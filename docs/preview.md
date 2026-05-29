@@ -113,16 +113,18 @@
 
 優先順位は以下：
 
-1. Claude Code 側からの指定（`claude-integration.md` で定める方式、未確定）
-2. `Cmd+O`/`Ctrl+O` でユーザーがファイル選択ダイアログから選んだファイル
+1. Claude Code がファイルを書き換えた結果（Edit / Write / NotebookEdit などのツール呼び出しによるファイルシステム変更）を `notify` が検出し、自動追従ロジック（`claude-integration.md` 5 章 案 A）でプレビュー対象を切替
+2. `Cmd+O`/`Ctrl+O` でユーザーがファイル選択ダイアログから選んだファイル（自動追従は OFF になる）
 3. コマンドライン引数で渡したパス（`mdpilot path/to/file.md` で起動）
-4. 何も指定されていない場合は空ペイン（プレースホルダ表示）
+4. 何も指定されていない場合は空ペイン（プレースホルダ表示）。Claude が最初に `.md` を編集した時点で 1. の経路で起動
 
 切替時：
 
 - 現在の Watcher を停止し、新ファイルに対する Watcher を開始
 - スクロール位置はリセット
 - ウィンドウタイトルを更新（`ui.md` 4 章）
+
+注: mdpilot は claude の stream-json 出力（`tool_use` イベント）を直接解釈してプレビュー対象を切り替えない（`claude-integration.md` 5.1 案 B は MVP 後）。検出経路はファイルシステムイベントのみ。
 
 ## 10. 大きなファイルへの対応
 
