@@ -1,5 +1,14 @@
 # Phase 0.5 スパイク結果レポート
 
+## 結論サマリ（2026-05-29 ピボット後）
+
+- **0.5.1 egui_term**: **採用中止**。本書の調査と判断 A の議論を経て、ユーザーが「ターミナル以外で Claude Code とやり取りする手段」を選び、In-app chat UI 路線（A 案）に方針転換。`spike/egui_term/` は git 履歴に残し、参考リソースとする
+- **0.5.2 egui_commonmark**: **継続採用**。preview ペインのレンダラとして使う
+- **方針転換後の新仕様**: `docs/chat.md`（新規）、`docs/requirements.md` / `docs/architecture.md` / `docs/ui.md` / `docs/claude-integration.md`（改訂）、`docs/terminal.md`（削除）に反映済み
+- **`docs/plan.md`**: Phase 2 / 3 を chat UI 実装に書き換え。Phase 0.5.1 は superseded マーク
+
+以降は当時の検証ログとして保持する。
+
 ## 検証範囲と前提
 
 - 対象クレート: `egui_term` / `egui_commonmark` / `syntect`（後者は egui_commonmark の feature 経由）
