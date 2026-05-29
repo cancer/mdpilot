@@ -1,9 +1,11 @@
 mod app;
+mod config;
 mod error;
 
 fn main() -> eframe::Result {
     init_tracing();
     install_panic_hook();
+    log_app_paths();
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -27,4 +29,16 @@ fn install_panic_hook() {
         tracing::error!(target: "mdpilot::panic", "{info}");
         default(info);
     }));
+}
+
+fn log_app_paths() {
+    match config::paths::AppPaths::resolve() {
+        Some(paths) => tracing::info!(
+            config_dir = %paths.config_dir.display(),
+            data_dir = %paths.data_dir.display(),
+            cache_dir = %paths.cache_dir.display(),
+            "resolved application paths",
+        ),
+        None => tracing::warn!("could not resolve application paths (no home directory?)"),
+    }
 }

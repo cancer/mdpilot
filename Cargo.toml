@@ -11,6 +11,7 @@ name = "mdpilot"
 path = "src/main.rs"
 
 [dependencies]
+directories = "6"
 eframe = "0.34"
 thiserror = "2"
 tracing = "0.1"
