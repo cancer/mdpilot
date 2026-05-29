@@ -1,0 +1,17 @@
+[package]
+name = "mdpilot"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Native GUI app that previews Markdown while Claude Code edits it"
+publish = false
+
+[[bin]]
+name = "mdpilot"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

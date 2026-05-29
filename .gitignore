@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+*.swp
+*.swo
+
+# Spike build artefacts (Phase 0.5)
+spike/*/target
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
