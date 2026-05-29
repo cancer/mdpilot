@@ -104,13 +104,37 @@
 
 ### 判断 A: egui_term の取り込み方法
 
+#### A-1〜A-3 の比較
+
 | 案 | 内容 | メリット | デメリット |
 |----|------|---------|-----------|
 | A-1 | `git = "https://github.com/Harzu/egui_term", rev = "df910f2"` 固定 | egui 0.34 で即着手可、reproducible | crates.io 公式リリース外を本体依存に含む、定期的に rev を bump する運用が必要 |
 | A-2 | 次の crates.io 正式リリース（0.2.0?）を待つ | 公式リリースのみで構成 | リリース時期不明、Phase 2 着手が遅延 |
 | A-3 | 別のターミナルウィジェット候補を再調査 | 選択肢を広げる | 調査コスト増、候補があるかも不明 |
 
-エージェント暫定案: **A-1**（Phase 2 にすぐ着手するため）。最終判断はユーザー。
+#### A-3 の調査結果（2026-05-29 時点）
+
+crates.io と GitHub から「egui + terminal/PTY 」をキーに調査した結果：
+
+| crate / repo | star | 直近 push | crates.io | コメント |
+|---|---|---|---|---|
+| **Harzu/egui_term** | 69 | 2026-05-26 | 0.1.0 (egui 0.31) / main は egui 0.34.2 | 本スパイクで採用、最活発、機能リスト最多 |
+| Quinntyx/egui-terminal | 33 | 2024-12-30 | 0.1.0 | **1 年以上更新なし**、egui バージョン未確認 |
+| Quinntyx/eguitty | 11 | 2025-01-04 | — | 同上、メンテされていない |
+| par-term | — | アクティブ | 0.32.0 | **アプリ本体**であり widget としての使い方不明、Sixel/iTerm2/Kitty 画像対応はある |
+| afar | — | 実験段階 | 0.0.0 | egui-elegance 依存、リモートシェル特化、汎用 widget ではない |
+| msiShariful/rustty, vibeterm, conch, zaxiom 等 | 0-4 | 様々 | — | いずれも **アプリ実装**で widget としては再利用不可 |
+
+**egui エコシステムで「実用可能なターミナル widget」は実質的に Harzu/egui_term のみ**。他は古いか、アプリ本体（widget ではない）か、機能が限定的。
+
+#### A-3 から派生する補助案
+
+| 案 | 内容 | コスト |
+|----|------|------|
+| A-3a | 自前実装（`alacritty_terminal` + `portable-pty` + egui のキー入力ハンドラを直接組む） | 大。本質的に egui_term がやっていることを再実装 |
+| A-3b | Harzu/egui_term を fork して mdpilot 配下で管理 | 中。fork メンテ運用が必要 |
+
+エージェント暫定案: **A-1（git rev 固定）**。Harzu/egui_term は実質的な唯一の生きた選択肢で、main は既に egui 0.34 対応している。fork する利点は今のところ無く、必要になったら後で fork に切替えれば良い。最終判断はユーザー。
 
 ### 判断 B: egui_commonmark の継続採用
 
