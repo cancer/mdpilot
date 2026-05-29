@@ -11,6 +11,7 @@ name = "mdpilot"
 path = "src/main.rs"
 
 [dependencies]
+eframe = "0.34"
 
 [profile.release]
 lto = "thin"
