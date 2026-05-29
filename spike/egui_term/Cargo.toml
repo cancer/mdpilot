@@ -1,0 +1,11 @@
+[package]
+name = "spike_egui_term"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+eframe = "0.34"
+egui_term = { git = "https://github.com/Harzu/egui_term", rev = "df910f2" }
