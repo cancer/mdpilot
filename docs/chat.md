@@ -79,6 +79,8 @@ Phase 2.0 で実機検証した内容を反映：
 
 ### 3.2 出力（claude → mdpilot）
 
+**パーサ実装方針（重要）**: `system/init` イベントは実機で 20 以上のフィールド（`cwd`, `tools`, `mcp_servers`, `model`, `permissionMode`, `slash_commands`, `apiKeySource`, `claude_code_version`, `output_style`, `agents`, `skills`, `plugins`, `analytics_disabled`, `uuid`, `memory_paths`, `fast_mode_state` 等）を持ち、claude のバージョンとともに増減する。**型付き `serde::Deserialize` の `struct` は使わず**、`serde_json::Value` の `.get(...)` 抽出で mdpilot が実際に使うフィールド（`session_id` など 5〜6 個）のみを取り出す。これにより claude が新フィールドを足しても壊れない。
+
 Phase 2.0 の実機検証および公式ドキュメント（agent-sdk/streaming-output.md, headless.md, CLI reference）から確認できているイベント：
 
 実機で観測した順序（`--include-partial-messages` 無し）：

@@ -43,6 +43,7 @@ struct DebugScreenshot {
     path: String,
     frame_count: u32,
     requested: bool,
+    closed: bool,
 }
 
 #[cfg(debug_assertions)]
@@ -54,10 +55,14 @@ impl DebugScreenshot {
                 path,
                 frame_count: 0,
                 requested: false,
+                closed: false,
             })
     }
 
     fn step(&mut self, ctx: &egui::Context) {
+        if self.closed {
+            return;
+        }
         self.frame_count += 1;
 
         if !self.requested && self.frame_count >= 30 {
@@ -86,7 +91,12 @@ impl DebugScreenshot {
                 buf.save(&self.path)
                     .expect("debug screenshot: png save failed");
                 eprintln!("debug screenshot saved to {}", &self.path);
-                std::process::exit(0);
+                // Walk through eframe's shutdown so future child processes
+                // (claude in Phase 2+) get a chance to Drop cleanly. Bypassing
+                // this with std::process::exit would orphan them.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.closed = true;
+                return;
             }
         }
 
