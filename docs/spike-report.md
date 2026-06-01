@@ -24,8 +24,25 @@
 
 - `--continue` 単独と `--session-id <existing> --continue` の差
 - `--include-partial-messages` をオンにしたときの `stream_event` 系の正確な順序
-- stream-json **入力**側のスキーマ（`echo` でメッセージを流す形式）
 - 中断（Esc）の実装方式（プロセスへの SIGINT で進行中の応答が止まるか）
+
+## Phase 2.2 検証: stream-json 入力スキーマ（2026-06-01）
+
+`echo '{"type":"user","message":{"role":"user","content":"say hi in 3 words"}}' | claude --print --verbose --input-format=stream-json --output-format=stream-json --dangerously-skip-permissions --session-id <fresh-uuid>` を実行し、入力スキーマを確定した。
+
+### 結論
+
+| 項目 | 結果 |
+|------|------|
+| 受理される最小入力 JSON | `{"type":"user","message":{"role":"user","content":"<text>"}}` |
+| `content` の型 | 文字列（プレーンテキスト）で受理される |
+| 改行区切り | JSON Lines（行末 `\n`）想定通り |
+| 応答 | `system/init` → `assistant`（"Hi there, friend!" を `content[0].text` に含む）→ `rate_limit_event` → `result.subtype=success` |
+| `input_tokens` | 6 — `content` 文字列がトークン化されている |
+
+### chat.md §3.1 への反映
+
+確定スキーマと未検証項目（配列 content、画像 source、parent_tool_use_id 等）を §3.1 に追記済み。Phase 2.5（stdin 書込み）はこの形式に従う。
 
 ## 0.5.2 追加検証: 描画品質（2026-06-01）
 

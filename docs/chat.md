@@ -70,12 +70,27 @@ Phase 2.0 で実機検証した内容を反映：
 
 ### 3.1 入力（mdpilot → claude）
 
-| 項目 | 状態 |
-|---|---|
-| スキーマ | **TBD（未文書化）**。Phase 2 着手時に `claude --print --input-format=stream-json` を実機テストし、最小ユーザーメッセージ JSON を確定 |
-| 改行区切り | JSON Lines（1 メッセージ = 1 行）と推定 |
+**確定スキーマ（Phase 2.2 で実機確認、2026-06-01）**:
 
-実機検証の最初のタスクとして、`echo '{"type":"user","content":"..."}' | claude --print --input-format=stream-json --output-format=stream-json` のようなテストを試し、受理される形式を特定する。
+1 メッセージ = 1 JSON Lines（行末 `\n`）：
+
+```json
+{"type":"user","message":{"role":"user","content":"say hi in 3 words"}}
+```
+
+| フィールド | 値 |
+|----------|----|
+| `type` | 文字列 `"user"`（claude 側は他の type も受け付ける可能性があるが mdpilot が送るのは user のみ） |
+| `message.role` | 文字列 `"user"` |
+| `message.content` | 文字列（プレーンテキスト）。実機テストで string 形式が受理されることを確認 |
+
+実機ログ（抜粋）: 上記 JSON を stdin に流すと claude が assistant 応答（`{"type":"assistant","message":{"content":[{"type":"text","text":"Hi there, friend!"}], ...}}`）を返した。`docs/spike-report.md` に詳細。
+
+**未検証（Phase 3 着手時に必要なら調査）**:
+
+- Anthropic API 風の配列 content `[{"type":"text","text":"..."}]` 形式が受理されるか
+- 添付画像（`{"type":"image","source":...}`）対応
+- `parent_tool_use_id` などの拡張フィールド
 
 ### 3.2 出力（claude → mdpilot）
 
