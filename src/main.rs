@@ -15,7 +15,11 @@ fn main() -> eframe::Result {
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
     };
-    eframe::run_native("mdpilot", options, Box::new(|_cc| Ok(Box::new(app::App))))
+    eframe::run_native(
+        "mdpilot",
+        options,
+        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+    )
 }
 
 fn init_tracing() {
