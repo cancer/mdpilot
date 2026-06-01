@@ -1,5 +1,32 @@
 # Phase 0.5 スパイク結果レポート
 
+## Phase 2.0 検証: `--session-id` セマンティクスと stream-json 形式（2026-06-01）
+
+`claude --print --session-id <fresh-uuid> --output-format=stream-json 'say hello in 5 words'` を macOS で実行して挙動を確認した。
+
+### 結論
+
+| 項目 | 結果 |
+|------|------|
+| `--session-id <新規 UUID>` | **新規セッションを作る**。エラーは出ず、`system/init` イベントの `session_id` フィールドに我々が渡した UUID がそのまま入っていた |
+| `--output-format=stream-json` の前提条件 | **`--verbose` の併用が必須**（指定しないと `"When using --print, --output-format=stream-json requires --verbose"` エラー）。公式 `--help` には明記されていない |
+| `--include-partial-messages` 無しでの assistant 出力 | `stream_event/content_block_delta/text_delta` は流れない。代わりに **`assistant` イベントがメッセージ完了時に 1 行で**流れる（`message.content` 配列に `{type: "text", text: ...}`） |
+| 実際の出力イベント（順序） | `system/hook_started` → `system/hook_response` → `system/init` → `assistant`（完全メッセージ）→ `rate_limit_event` → `result` |
+| `result` の完了マーカー | `{type: "result", subtype: "success", terminal_reason: "completed", total_cost_usd, duration_ms, ...}` |
+
+### 反映が必要な仕様書差分
+
+1. `chat.md` 2.1: `--verbose` を必須オプションに追加
+2. `chat.md` 3.2: 既知イベント一覧に `system/hook_started`, `system/hook_response`, `assistant`, `rate_limit_event` を追加。`stream_event/text_delta` は `--include-partial-messages` がオンのときだけと注記
+3. `chat.md` 5.2: ブートストラップ確定 — 「ディスクに保存があれば `--session-id <existing> --continue`、無ければ新規 UUID 生成して `--session-id <new>` で起動。`system/init` で session_id が確定する」
+
+### 未検証（次フェーズ以降）
+
+- `--continue` 単独と `--session-id <existing> --continue` の差
+- `--include-partial-messages` をオンにしたときの `stream_event` 系の正確な順序
+- stream-json **入力**側のスキーマ（`echo` でメッセージを流す形式）
+- 中断（Esc）の実装方式（プロセスへの SIGINT で進行中の応答が止まるか）
+
 ## 0.5.2 追加検証: 描画品質（2026-06-01）
 
 `spike_egui_commonmark` を改造して `ViewportCommand::Screenshot` で内部スクショを 3 枚撮影し、エージェントが画像を Read で確認した結果：

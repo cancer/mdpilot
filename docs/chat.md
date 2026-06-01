@@ -20,23 +20,25 @@
 ```
 claude
   --print
+  --verbose
   --input-format=stream-json
   --output-format=stream-json
   --include-partial-messages
   --dangerously-skip-permissions
-  [--continue | --session-id <uuid>]
+  --session-id <uuid> [--continue]
   [--model <model>]
 ```
 
 | オプション | 役割 |
 |---|---|
 | `--print` | 非対話モード（標準入出力で JSON ストリーミング） |
+| `--verbose` | **`--output-format=stream-json` と `--print` を併用するときに必須**（エラー: "When using --print, --output-format=stream-json requires --verbose"。Phase 2.0 で実機検証） |
 | `--input-format=stream-json` | 標準入力を stream-json として受け付け |
 | `--output-format=stream-json` | 標準出力を stream-json として吐き出し |
-| `--include-partial-messages` | 部分メッセージ（`StreamEvent`）を含める。差分単位での描画が可能になる |
+| `--include-partial-messages` | 部分メッセージ（`stream_event` 系）を含める。これが無いとテキストは `assistant` イベントとしてメッセージ完了時に 1 行で流れ、ストリーミング表示にならない |
 | `--dangerously-skip-permissions` | ツール呼び出しの許可ダイアログをスキップ。MVP の前提 |
-| `--continue` | カレントディレクトリの直近セッションを再開 |
-| `--session-id <uuid>` | 特定セッション ID を指定 |
+| `--continue` | 同一 cwd の直近セッションを再開（`--session-id` と併用すると特定セッションを継続） |
+| `--session-id <uuid>` | セッション ID を明示。**新規 UUID を渡すと新規セッションを作る**（Phase 2.0 で実機検証） |
 
 ### 2.2 起動時の cwd と環境変数
 
@@ -49,9 +51,11 @@ claude
 
 ### 2.3 起動時のセッション選択
 
+Phase 2.0 で実機検証した内容を反映：
+
 1. プロジェクトルートと session-id の対応をディスクから読む（`session_store`、後述 5 章）
-2. 対応がある場合: `--session-id <uuid> --continue` を付けて起動
-3. 対応が無い場合: `--session-id <uuid>` で **新規 UUID を生成**して起動。session-id は最初の `system/init` イベントが流れてきた時点でディスクに保存
+2. 対応がある場合: `--session-id <existing-uuid> --continue` を付けて起動
+3. 対応が無い場合: 新規 UUID（`uuid` クレートで v4 生成）を作り、`--session-id <new-uuid>` のみを付けて起動。claude は新規セッションを作り、`system/init` イベントで同じ UUID を session_id として返してくる。mdpilot はこの session_id をディスクに保存
 4. 起動に失敗した場合: chat ペインにエラー表示、ユーザーが手動で「再接続」できるボタンを出す（MVP の最小エラー UI）
 
 ### 2.4 子プロセス終了時の挙動
@@ -75,7 +79,17 @@ claude
 
 ### 3.2 出力（claude → mdpilot）
 
-公式ドキュメント（agent-sdk/streaming-output.md, headless.md, CLI reference）から確認できているイベント：
+Phase 2.0 の実機検証および公式ドキュメント（agent-sdk/streaming-output.md, headless.md, CLI reference）から確認できているイベント：
+
+実機で観測した順序（`--include-partial-messages` 無し）：
+1. `system/hook_started`（SessionStart hook 起動）
+2. `system/hook_response`（同上完了）
+3. `system/init`（session_id, cwd, tools, mcp_servers, model, plugins などの起動情報）
+4. `assistant`（完全な assistant メッセージ 1 行、`message.content` 配列に `{type: "text", text: ...}` や `tool_use` を含む）
+5. `rate_limit_event`（レート制限ステータス）
+6. `result`（`subtype: "success"`, `terminal_reason: "completed"`, `duration_ms`, `total_cost_usd` などを含む完了マーカー）
+
+`--include-partial-messages` を付けると、`assistant` の代わりに / に加えて `stream_event/content_block_delta/text_delta` 等の差分イベントが流れる（公式ドキュメント記載、Phase 2 で実機検証予定）。
 
 #### 3.2.1 `system / init`（初期化）
 
