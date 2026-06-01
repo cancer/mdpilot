@@ -11,6 +11,7 @@ name = "mdpilot"
 path = "src/main.rs"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 directories = "6"
 eframe = "0.34"
 serde = { version = "1", features = ["derive"] }
@@ -23,6 +24,9 @@ uuid = { version = "1", features = ["v4"] }
 # Used only by the debug-build screenshot helper (cfg(debug_assertions)).
 # In release builds the helper is compiled out, so this dep is dead-stripped.
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 lto = "thin"
