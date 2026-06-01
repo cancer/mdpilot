@@ -1,9 +1,17 @@
-use eframe::egui;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use crate::chat::history::ChatHistory;
+use eframe::egui;
+use uuid::Uuid;
+
+use crate::chat::history::{ChatHistory, SystemMessage};
+use crate::chat::session::{ChatSession, SpawnOptions};
+use crate::chat::stream::ChatEvent;
 
 pub struct App {
     chat: ChatHistory,
+    session: Option<ChatSession>,
+    events_rx: Option<Receiver<ChatEvent>>,
+    disconnect_announced: bool,
     #[cfg(debug_assertions)]
     debug_screenshot: Option<DebugScreenshot>,
 }
@@ -11,23 +19,137 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::ui::fonts::install_japanese(&cc.egui_ctx);
-        Self::default()
-    }
-}
 
-impl Default for App {
-    fn default() -> Self {
+        let mut chat = ChatHistory::default();
+        let (session, events_rx) = match spawn_session(&cc.egui_ctx) {
+            Ok((session, rx)) => (Some(session), Some(rx)),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to spawn claude session");
+                chat.push_system(SystemMessage::SpawnFailed {
+                    error: err.to_string(),
+                });
+                (None, None)
+            }
+        };
+
         Self {
-            chat: ChatHistory::default(),
+            chat,
+            session,
+            events_rx,
+            disconnect_announced: false,
             #[cfg(debug_assertions)]
             debug_screenshot: DebugScreenshot::from_env(),
         }
     }
+
+    /// Write a user prompt to claude's stdin and record it in the local
+    /// history. The matching assistant placeholder is only created on
+    /// successful write so a `BrokenPipe` doesn't leave an empty assistant
+    /// row sitting above the Disconnected banner.
+    fn handle_send(&mut self, text: String) {
+        self.chat.push_user(text.clone());
+        let Some(session) = self.session.as_mut() else {
+            // session is None only after a SpawnFailed at startup — that
+            // banner is already in history, so don't double up on a second
+            // Disconnected line. The Send button should already be disabled
+            // in this state; reaching here means the input got past the
+            // disabled gate, which is worth logging.
+            tracing::warn!("send dispatched without an active claude session");
+            return;
+        };
+        match session.send_user_message(&text) {
+            Ok(()) => self.chat.start_assistant(None),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to write to claude stdin");
+                if !self.disconnect_announced {
+                    self.chat.push_system(SystemMessage::Disconnected);
+                    self.disconnect_announced = true;
+                }
+            }
+        }
+    }
+
+    /// Pull every pending event off the channel and fold it into the
+    /// history. Called in `logic()` so the side effects are visible by the
+    /// time `ui()` renders the same frame.
+    fn drain_chat_events(&mut self) {
+        let Some(rx) = self.events_rx.as_ref() else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok(event) => self.chat.apply(event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !self.disconnect_announced {
+                        self.chat.push_system(SystemMessage::Disconnected);
+                        self.disconnect_announced = true;
+                    }
+                    self.events_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Spawn the claude child process with cwd = current working directory and a
+/// fresh session id. Returns the session and the receiver half of the event
+/// channel. Phase 6 will replace `current_dir()` with the resolved project
+/// root and start reading session ids from `SessionStore`.
+fn spawn_session(ctx: &egui::Context) -> std::io::Result<(ChatSession, Receiver<ChatEvent>)> {
+    let project_root = std::env::current_dir()?;
+    let (tx, rx) = mpsc::channel::<ChatEvent>();
+    let wake_ctx = ctx.clone();
+    let session = ChatSession::start(
+        SpawnOptions {
+            project_root,
+            session_id: Uuid::new_v4(),
+            continue_session: false,
+            model: None,
+        },
+        tx,
+        move || wake_ctx.request_repaint(),
+    )?;
+    Ok((session, rx))
 }
 
 impl eframe::App for App {
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.drain_chat_events();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        crate::ui::layout::show(ui, &mut self.chat);
+        // The view records send/cancel intent into these locals; the actual
+        // history mutation and stdin write happen after the UI pass so the
+        // borrow on `self.chat` inside layout::show stays the only one in
+        // play at a time.
+        let session_alive = self.session.is_some();
+        let mut send_text: Option<String> = None;
+        let mut cancel_requested = false;
+        {
+            let mut on_send = |text: String| {
+                send_text = Some(text);
+            };
+            let mut on_cancel = || {
+                cancel_requested = true;
+            };
+            crate::ui::layout::show(
+                ui,
+                &mut self.chat,
+                session_alive,
+                &mut on_send,
+                &mut on_cancel,
+            );
+        }
+
+        if let Some(text) = send_text {
+            self.handle_send(text);
+        }
+        if cancel_requested {
+            // Phase 3.6: SIGINT / RPC abort. Until then, just log.
+            tracing::info!("中断 clicked — interrupt mechanism is Phase 3.6");
+        }
 
         #[cfg(debug_assertions)]
         if let Some(cap) = self.debug_screenshot.as_mut() {

@@ -50,6 +50,8 @@ pub enum SystemMessage {
     ResultError { subtype: String },
     /// claude child process exited while a response was in flight.
     Disconnected,
+    /// `ChatSession::start` failed (e.g. `claude` not on `$PATH`).
+    SpawnFailed { error: String },
 }
 
 impl ChatHistory {

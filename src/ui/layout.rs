@@ -5,7 +5,13 @@ use crate::chat::history::ChatHistory;
 const MIN_PANE_WIDTH: f32 = 240.0;
 const PREVIEW_PANEL_ID: &str = "preview_pane";
 
-pub fn show(ui: &mut egui::Ui, history: &mut ChatHistory) {
+pub fn show(
+    ui: &mut egui::Ui,
+    history: &mut ChatHistory,
+    session_alive: bool,
+    on_send: &mut dyn FnMut(String),
+    on_cancel: &mut dyn FnMut(),
+) {
     let avail = ui.available_width();
     let max_left = (avail - MIN_PANE_WIDTH).max(MIN_PANE_WIDTH);
 
@@ -34,7 +40,7 @@ pub fn show(ui: &mut egui::Ui, history: &mut ChatHistory) {
     }
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
-        crate::ui::chat_pane::show(ui, history);
+        crate::ui::chat_pane::show(ui, history, session_alive, on_send, on_cancel);
     });
 }
 

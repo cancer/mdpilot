@@ -192,7 +192,11 @@ fn optional_string_field(value: &Value, key: &str) -> Option<String> {
 /// Read JSON Lines off `reader` and forward each parsed event into `sender`.
 /// Blank lines are skipped; invalid JSON is logged via tracing and skipped.
 /// Returns when the reader hits EOF or the receiver is dropped.
-pub fn pipe_stdout_to_channel<R: BufRead>(reader: R, sender: Sender<ChatEvent>) {
+///
+/// `wake` runs after every successful `sender.send(...)`. App passes a
+/// closure that calls `egui::Context::request_repaint` so the UI thread
+/// notices the new event without waiting for the next OS-level input.
+pub fn pipe_stdout_to_channel<R: BufRead, F: Fn()>(reader: R, sender: Sender<ChatEvent>, wake: F) {
     for line in reader.lines() {
         match line {
             Ok(line) if line.is_empty() => continue,
@@ -205,6 +209,7 @@ pub fn pipe_stdout_to_channel<R: BufRead>(reader: R, sender: Sender<ChatEvent>) 
                     if sender.send(event).is_err() {
                         break;
                     }
+                    wake();
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -376,7 +381,7 @@ mod tests {
         let payload = b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n\
                         {\"type\":\"result\",\"subtype\":\"success\"}\n";
         let (tx, rx) = std::sync::mpsc::channel();
-        pipe_stdout_to_channel(std::io::Cursor::new(&payload[..]), tx);
+        pipe_stdout_to_channel(std::io::Cursor::new(&payload[..]), tx, || {});
         let received: Vec<ChatEvent> = rx.iter().collect();
         assert_eq!(received.len(), 2);
         assert!(matches!(received[0], ChatEvent::Init { .. }));
@@ -389,9 +394,33 @@ mod tests {
                         not json\n\
                         {\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n";
         let (tx, rx) = std::sync::mpsc::channel();
-        pipe_stdout_to_channel(std::io::Cursor::new(&payload[..]), tx);
+        pipe_stdout_to_channel(std::io::Cursor::new(&payload[..]), tx, || {});
         let received: Vec<ChatEvent> = rx.iter().collect();
         assert_eq!(received.len(), 1);
         assert!(matches!(received[0], ChatEvent::Init { .. }));
+    }
+
+    #[test]
+    fn pipe_invokes_wake_once_per_forwarded_event() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let payload = b"\n\
+                        garbage\n\
+                        {\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n\
+                        {\"type\":\"result\",\"subtype\":\"success\"}\n";
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        pipe_stdout_to_channel(std::io::Cursor::new(&payload[..]), tx, move || {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        let received: Vec<ChatEvent> = rx.iter().collect();
+        assert_eq!(received.len(), 2);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "wake should fire once per successful send, not on blank/garbage lines",
+        );
     }
 }

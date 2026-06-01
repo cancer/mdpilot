@@ -2,13 +2,16 @@
 // the struct fields and accessors look dead from the bin crate.
 #![allow(dead_code)]
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use uuid::Uuid;
+
+use crate::chat::stream::{pipe_stdout_to_channel, ChatEvent};
 
 /// Options for spawning the `claude` child process. The contract is pinned
 /// in `docs/chat.md` 2.1 and verified against an actual `claude` run in
@@ -29,12 +32,26 @@ pub struct SpawnOptions {
 pub struct ChatSession {
     child: Child,
     session_id: Uuid,
+    stdout_handle: Option<JoinHandle<()>>,
     stderr_handle: Option<JoinHandle<()>>,
     stdin: Option<ChildStdin>,
 }
 
 impl ChatSession {
-    pub fn start(opts: SpawnOptions) -> std::io::Result<Self> {
+    /// Spawn `claude` and start the stdout/stderr drain threads.
+    ///
+    /// `events_tx` receives every parsed `ChatEvent` (the App folds them into
+    /// `ChatHistory`). `wake_ui` is called once per forwarded event so the
+    /// main UI thread re-renders without waiting for a mouse move — App passes
+    /// a closure that calls `egui::Context::request_repaint`.
+    pub fn start<F>(
+        opts: SpawnOptions,
+        events_tx: Sender<ChatEvent>,
+        wake_ui: F,
+    ) -> std::io::Result<Self>
+    where
+        F: Fn() + Send + 'static,
+    {
         let args = build_args(&opts);
         let mut child = Command::new("claude")
             .args(&args)
@@ -45,12 +62,19 @@ impl ChatSession {
             .stderr(Stdio::piped())
             .spawn()?;
 
+        // claude's stdout is the stream-json transport. Parsing happens on a
+        // dedicated thread so the UI thread never blocks on read().
+        let stdout_handle = child.stdout.take().map(|stdout| {
+            let reader = BufReader::new(stdout);
+            thread::spawn(move || pipe_stdout_to_channel(reader, events_tx, wake_ui))
+        });
+
         // claude's stderr is a low-volume, human-readable log stream; pipe
         // it into tracing so panics / API key errors / etc. surface in the
         // application log. The thread exits when the child closes stderr,
         // which happens after `kill()` in Drop.
         let stderr_handle = child.stderr.take().map(|stderr| {
-            let reader = std::io::BufReader::new(stderr);
+            let reader = BufReader::new(stderr);
             thread::spawn(move || pipe_lines_to_tracing(reader))
         });
 
@@ -59,6 +83,7 @@ impl ChatSession {
         Ok(Self {
             child,
             session_id: opts.session_id,
+            stdout_handle,
             stderr_handle,
             stdin,
         })
@@ -105,11 +130,10 @@ impl Drop for ChatSession {
         // on its own. Without this, --print mode keeps reading from stdin.
         let _ = self.stdin.take();
 
-        // Skip the rest if claude has already exited.
-        if let Ok(Some(_)) = self.child.try_wait() {
-            if let Some(handle) = self.stderr_handle.take() {
-                let _ = handle.join();
-            }
+        // Skip the kill path if claude has already exited; just join drain
+        // threads so they don't outlive us.
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.join_drains();
             return;
         }
 
@@ -132,6 +156,18 @@ impl Drop for ChatSession {
             }
         }
 
+        self.join_drains();
+    }
+}
+
+impl ChatSession {
+    /// Join the stdout drain first (it EOFs once claude closes stdout, which
+    /// only happens after the child has exited), then the stderr drain.
+    /// Joining either before the child exits would hang.
+    fn join_drains(&mut self) {
+        if let Some(handle) = self.stdout_handle.take() {
+            let _ = handle.join();
+        }
         if let Some(handle) = self.stderr_handle.take() {
             let _ = handle.join();
         }
