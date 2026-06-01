@@ -2,8 +2,10 @@
 // the struct fields and accessors look dead from the bin crate.
 #![allow(dead_code)]
 
+use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::thread::{self, JoinHandle};
 
 use uuid::Uuid;
 
@@ -26,12 +28,13 @@ pub struct SpawnOptions {
 pub struct ChatSession {
     child: Child,
     session_id: Uuid,
+    stderr_handle: Option<JoinHandle<()>>,
 }
 
 impl ChatSession {
     pub fn start(opts: SpawnOptions) -> std::io::Result<Self> {
         let args = build_args(&opts);
-        let child = Command::new("claude")
+        let mut child = Command::new("claude")
             .args(&args)
             .current_dir(&opts.project_root)
             .env("MDPILOT_PROJECT_ROOT", &opts.project_root)
@@ -39,9 +42,20 @@ impl ChatSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+
+        // claude's stderr is a low-volume, human-readable log stream; pipe
+        // it into tracing so panics / API key errors / etc. surface in the
+        // application log. The thread exits when the child closes stderr,
+        // which happens after `kill()` in Drop.
+        let stderr_handle = child.stderr.take().map(|stderr| {
+            let reader = std::io::BufReader::new(stderr);
+            thread::spawn(move || pipe_lines_to_tracing(reader))
+        });
+
         Ok(Self {
             child,
             session_id: opts.session_id,
+            stderr_handle,
         })
     }
 
@@ -54,6 +68,26 @@ impl Drop for ChatSession {
     fn drop(&mut self) {
         // Best-effort termination; the child may have already exited.
         let _ = self.child.kill();
+        // Drain the stderr thread so its output reaches tracing before we
+        // return from Drop. The thread exits on EOF, which kill() guarantees.
+        if let Some(handle) = self.stderr_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Forward every line of `reader` to `tracing::warn` under the
+/// `claude::stderr` target. Reading is best-effort: read errors are logged
+/// and end the drain. Returns when the reader hits EOF.
+pub(crate) fn pipe_lines_to_tracing<R: BufRead>(reader: R) {
+    for line in reader.lines() {
+        match line {
+            Ok(line) => tracing::warn!(target: "claude::stderr", "{line}"),
+            Err(err) => {
+                tracing::warn!("error reading claude stderr: {err}");
+                break;
+            }
+        }
     }
 }
 
@@ -144,7 +178,10 @@ mod tests {
             .iter()
             .position(|a| a == "--model")
             .expect("--model expected in args");
-        assert_eq!(args.get(model_idx + 1).map(String::as_str), Some("claude-opus-4-7"));
+        assert_eq!(
+            args.get(model_idx + 1).map(String::as_str),
+            Some("claude-opus-4-7")
+        );
     }
 
     #[test]
@@ -154,5 +191,20 @@ mod tests {
             !args.iter().any(|a| a == "--model"),
             "default invocation should not pass --model: {args:?}",
         );
+    }
+
+    #[test]
+    fn pipe_lines_to_tracing_drains_until_eof() {
+        let payload = b"first stderr line\nsecond line\n";
+        let reader = std::io::Cursor::new(&payload[..]);
+        pipe_lines_to_tracing(reader);
+        // Just asserting that the function returns rather than blocking or
+        // panicking; tracing output isn't observable without a subscriber.
+    }
+
+    #[test]
+    fn pipe_lines_to_tracing_returns_on_empty_input() {
+        let reader = std::io::Cursor::new(&b""[..]);
+        pipe_lines_to_tracing(reader);
     }
 }
