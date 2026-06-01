@@ -13,3 +13,4 @@ egui_commonmark = { version = "0.23", features = [
     "svg",
     "embedded_image",
 ] }
+image = { version = "0.25", default-features = false, features = ["png"] }

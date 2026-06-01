@@ -3228,6 +3228,7 @@ version = "0.0.0"
 dependencies = [
  "eframe",
  "egui_commonmark",
+ "image",
 ]
 
 [[package]]
