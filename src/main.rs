@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod error;
+mod ui;
 
 fn main() -> eframe::Result {
     init_tracing();
