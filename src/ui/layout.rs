@@ -1,12 +1,13 @@
 use eframe::egui;
 
 const MIN_PANE_WIDTH: f32 = 240.0;
+const PREVIEW_PANEL_ID: &str = "preview_pane";
 
 pub fn show(ui: &mut egui::Ui) {
     let avail = ui.available_width();
     let max_left = (avail - MIN_PANE_WIDTH).max(MIN_PANE_WIDTH);
 
-    egui::Panel::left("preview_pane")
+    let preview = egui::Panel::left(PREVIEW_PANEL_ID)
         .resizable(true)
         .default_size(avail / 2.0)
         .size_range(MIN_PANE_WIDTH..=max_left)
@@ -14,7 +15,31 @@ pub fn show(ui: &mut egui::Ui) {
             crate::ui::preview_pane::show(ui);
         });
 
+    // Hit-strip on the right edge of the preview pane: a thin column where the
+    // resize handle lives. A double-click here resets to a 50/50 split.
+    let edge_x = preview.response.rect.right();
+    let edge_rect = egui::Rect::from_x_y_ranges(
+        (edge_x - 4.0)..=(edge_x + 4.0),
+        preview.response.rect.y_range(),
+    );
+    let edge = ui.interact(
+        edge_rect,
+        egui::Id::new("pane_boundary_dblclick"),
+        egui::Sense::click(),
+    );
+    if edge.double_clicked() {
+        reset(ui.ctx());
+    }
+
     egui::CentralPanel::default().show_inside(ui, |ui| {
         crate::ui::chat_pane::show(ui);
+    });
+}
+
+/// Drop the persisted panel state so the next frame falls back to
+/// `default_size` (a 50/50 split for our layout).
+pub fn reset(ctx: &egui::Context) {
+    ctx.data_mut(|d| {
+        d.remove::<egui::PanelState>(egui::Id::new(PREVIEW_PANEL_ID));
     });
 }
