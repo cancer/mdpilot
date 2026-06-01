@@ -2,9 +2,9 @@
 // the struct fields and accessors look dead from the bin crate.
 #![allow(dead_code)]
 
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::thread::{self, JoinHandle};
 
 use uuid::Uuid;
@@ -29,6 +29,7 @@ pub struct ChatSession {
     child: Child,
     session_id: Uuid,
     stderr_handle: Option<JoinHandle<()>>,
+    stdin: Option<ChildStdin>,
 }
 
 impl ChatSession {
@@ -52,15 +53,31 @@ impl ChatSession {
             thread::spawn(move || pipe_lines_to_tracing(reader))
         });
 
+        let stdin = child.stdin.take();
+
         Ok(Self {
             child,
             session_id: opts.session_id,
             stderr_handle,
+            stdin,
         })
     }
 
     pub fn session_id(&self) -> Uuid {
         self.session_id
+    }
+
+    /// Send a single user prompt down claude's stdin as one JSON line in the
+    /// schema confirmed by Phase 2.2:
+    /// `{"type":"user","message":{"role":"user","content":"<text>"}}`.
+    pub fn send_user_message(&mut self, text: &str) -> std::io::Result<()> {
+        let stdin = self.stdin.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "claude stdin is not available (process exited?)",
+            )
+        })?;
+        write_user_message(stdin, text)
     }
 }
 
@@ -74,6 +91,20 @@ impl Drop for ChatSession {
             let _ = handle.join();
         }
     }
+}
+
+/// Serialize a single user message in the stream-json input contract (see
+/// `docs/chat.md` §3.1) and write it as one JSON line followed by `\n`,
+/// flushing the writer so the child observes the request.
+pub(crate) fn write_user_message<W: Write>(writer: &mut W, text: &str) -> std::io::Result<()> {
+    let payload = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": text},
+    });
+    serde_json::to_writer(&mut *writer, &payload)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
 }
 
 /// Forward every line of `reader` to `tracing::warn` under the
@@ -206,5 +237,40 @@ mod tests {
     fn pipe_lines_to_tracing_returns_on_empty_input() {
         let reader = std::io::Cursor::new(&b""[..]);
         pipe_lines_to_tracing(reader);
+    }
+
+    #[test]
+    fn write_user_message_emits_one_jsonl() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_user_message(&mut buf, "hello world").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.ends_with('\n'), "must terminate with newline: {s:?}");
+        let trimmed = s.trim_end();
+        let parsed: serde_json::Value = serde_json::from_str(trimmed).unwrap();
+        assert_eq!(parsed["type"], "user");
+        assert_eq!(parsed["message"]["role"], "user");
+        assert_eq!(parsed["message"]["content"], "hello world");
+    }
+
+    #[test]
+    fn write_user_message_escapes_quotes_and_newlines() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_user_message(&mut buf, "say \"hi\"\nthen \"bye\"").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        // Exactly one terminating newline; the embedded newline must be
+        // JSON-escaped, not emitted as a literal LF.
+        let line_count = s.matches('\n').count();
+        assert_eq!(line_count, 1, "expected one \\n, got {line_count}: {s:?}");
+        let parsed: serde_json::Value = serde_json::from_str(s.trim_end()).unwrap();
+        assert_eq!(parsed["message"]["content"], "say \"hi\"\nthen \"bye\"");
+    }
+
+    #[test]
+    fn write_user_message_handles_japanese_utf8() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_user_message(&mut buf, "こんにちは").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(s.trim_end()).unwrap();
+        assert_eq!(parsed["message"]["content"], "こんにちは");
     }
 }
