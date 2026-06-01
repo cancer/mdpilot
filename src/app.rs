@@ -1,6 +1,9 @@
 use eframe::egui;
 
+use crate::chat::history::ChatHistory;
+
 pub struct App {
+    chat: ChatHistory,
     #[cfg(debug_assertions)]
     debug_screenshot: Option<DebugScreenshot>,
 }
@@ -15,6 +18,7 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            chat: ChatHistory::default(),
             #[cfg(debug_assertions)]
             debug_screenshot: DebugScreenshot::from_env(),
         }
@@ -23,7 +27,7 @@ impl Default for App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        crate::ui::layout::show(ui);
+        crate::ui::layout::show(ui, &mut self.chat);
 
         #[cfg(debug_assertions)]
         if let Some(cap) = self.debug_screenshot.as_mut() {
