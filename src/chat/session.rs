@@ -4,8 +4,9 @@
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
@@ -79,18 +80,81 @@ impl ChatSession {
         })?;
         write_user_message(stdin, text)
     }
+
+    /// Non-blocking liveness probe. `Running` if claude is still up;
+    /// `Exited(status)` once it has terminated (either normally or via the
+    /// graceful shutdown path in Drop).
+    pub fn status(&mut self) -> std::io::Result<SessionStatus> {
+        match self.child.try_wait()? {
+            None => Ok(SessionStatus::Running),
+            Some(status) => Ok(SessionStatus::Exited(status)),
+        }
+    }
+}
+
+/// Outcome of `ChatSession::status()`.
+#[derive(Debug)]
+pub enum SessionStatus {
+    Running,
+    Exited(ExitStatus),
 }
 
 impl Drop for ChatSession {
     fn drop(&mut self) {
-        // Best-effort termination; the child may have already exited.
-        let _ = self.child.kill();
-        // Drain the stderr thread so its output reaches tracing before we
-        // return from Drop. The thread exits on EOF, which kill() guarantees.
+        // Drop stdin first so claude observes EOF and gets a chance to exit
+        // on its own. Without this, --print mode keeps reading from stdin.
+        let _ = self.stdin.take();
+
+        // Skip the rest if claude has already exited.
+        if let Ok(Some(_)) = self.child.try_wait() {
+            if let Some(handle) = self.stderr_handle.take() {
+                let _ = handle.join();
+            }
+            return;
+        }
+
+        // Polite shutdown on Unix: SIGTERM and wait up to GRACE_DURATION.
+        // Windows has no SIGTERM analogue, so it falls through to kill().
+        terminate_polite(&self.child);
+        let deadline = Instant::now() + GRACE_DURATION;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                Err(_) => break,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = self.child.kill();
+                        let _ = self.child.wait();
+                        break;
+                    }
+                    thread::sleep(POLL_INTERVAL);
+                }
+            }
+        }
+
         if let Some(handle) = self.stderr_handle.take() {
             let _ = handle.join();
         }
     }
+}
+
+const GRACE_DURATION: Duration = Duration::from_millis(500);
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+#[cfg(unix)]
+fn terminate_polite(child: &Child) {
+    // Safety: child.id() is the pid of a process we own; sending SIGTERM is
+    // safe even if it has already exited (returns ESRCH which we ignore).
+    let pid = child.id() as libc::pid_t;
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_polite(_child: &Child) {
+    // No SIGTERM equivalent on Windows; the Drop loop falls through to
+    // Child::kill() after the grace period.
 }
 
 /// Serialize a single user message in the stream-json input contract (see

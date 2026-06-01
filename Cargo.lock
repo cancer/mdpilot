@@ -1809,6 +1809,7 @@ dependencies = [
  "directories",
  "eframe",
  "image",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

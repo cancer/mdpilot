@@ -25,6 +25,9 @@ uuid = { version = "1", features = ["v4"] }
 # In release builds the helper is compiled out, so this dep is dead-stripped.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 
