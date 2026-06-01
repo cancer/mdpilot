@@ -43,3 +43,36 @@ pub fn reset(ctx: &egui::Context) {
         d.remove::<egui::PanelState>(egui::Id::new(PREVIEW_PANEL_ID));
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_clears_persisted_panel_state() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new(PREVIEW_PANEL_ID);
+        let stored = egui::PanelState {
+            rect: egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(123.0, 456.0)),
+        };
+        ctx.data_mut(|d| d.insert_persisted(id, stored));
+
+        let before: Option<egui::PanelState> = ctx.data_mut(|d| d.get_persisted(id));
+        assert!(before.is_some(), "precondition: state was stored");
+
+        reset(&ctx);
+
+        let after: Option<egui::PanelState> = ctx.data_mut(|d| d.get_persisted(id));
+        assert!(after.is_none(), "reset should remove the persisted state");
+    }
+
+    #[test]
+    fn reset_is_a_no_op_when_nothing_is_stored() {
+        let ctx = egui::Context::default();
+        // Should not panic and should leave the (absent) state absent.
+        reset(&ctx);
+        let after: Option<egui::PanelState> =
+            ctx.data_mut(|d| d.get_persisted(egui::Id::new(PREVIEW_PANEL_ID)));
+        assert!(after.is_none());
+    }
+}
