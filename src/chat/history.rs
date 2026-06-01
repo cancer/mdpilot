@@ -6,6 +6,8 @@
 
 use serde_json::Value;
 
+use crate::chat::stream::ChatEvent;
+
 #[derive(Debug, Default, Clone)]
 pub struct ChatHistory {
     pub messages: Vec<ChatMessage>,
@@ -129,6 +131,45 @@ impl ChatHistory {
     pub fn push_system(&mut self, system: SystemMessage) {
         self.messages.push(ChatMessage::System(system));
     }
+
+    /// Fold a stream-json event into the history. Init events do not move
+    /// the history (they're handled at the session level); Unknown events
+    /// are ignored (the parser already logs them).
+    pub fn apply(&mut self, event: ChatEvent) {
+        match event {
+            ChatEvent::Init { .. } | ChatEvent::Unknown { .. } => {}
+            ChatEvent::AssistantMessage { text, message_id } => {
+                self.replace_assistant_text(message_id, text);
+            }
+            ChatEvent::TextDelta { text, .. } => {
+                self.append_assistant_text(&text);
+            }
+            ChatEvent::ToolUse { id, name, input } => {
+                self.push_tool_use(ToolBlock {
+                    id,
+                    name,
+                    input,
+                    output: None,
+                });
+            }
+            ChatEvent::ApiRetry {
+                attempt,
+                max_retries,
+                error,
+            } => {
+                self.push_system(SystemMessage::ApiRetry {
+                    attempt,
+                    max_retries,
+                    error,
+                });
+            }
+            ChatEvent::Result { subtype, .. } => {
+                if subtype != "success" {
+                    self.push_system(SystemMessage::ResultError { subtype });
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +276,117 @@ mod tests {
             ChatMessage::Assistant { tools, .. } => assert!(tools.is_empty()),
             other => panic!("expected Assistant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn apply_text_delta_extends_assistant_message() {
+        let mut h = ChatHistory::default();
+        h.apply(ChatEvent::TextDelta {
+            uuid: Some("u1".into()),
+            text: "Hello, ".into(),
+        });
+        h.apply(ChatEvent::TextDelta {
+            uuid: Some("u1".into()),
+            text: "world!".into(),
+        });
+        match h.messages.last().unwrap() {
+            ChatMessage::Assistant { text, .. } => assert_eq!(text, "Hello, world!"),
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_full_assistant_message_replaces_partial() {
+        let mut h = ChatHistory::default();
+        h.apply(ChatEvent::TextDelta {
+            uuid: None,
+            text: "partial".into(),
+        });
+        h.apply(ChatEvent::AssistantMessage {
+            text: "final".into(),
+            message_id: Some("msg_1".into()),
+        });
+        match h.messages.last().unwrap() {
+            ChatMessage::Assistant {
+                text, message_id, ..
+            } => {
+                assert_eq!(text, "final");
+                assert_eq!(message_id.as_deref(), Some("msg_1"));
+            }
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_tool_use_attaches_block() {
+        let mut h = ChatHistory::default();
+        h.apply(ChatEvent::AssistantMessage {
+            text: "running…".into(),
+            message_id: None,
+        });
+        h.apply(ChatEvent::ToolUse {
+            id: "tu_1".into(),
+            name: "Edit".into(),
+            input: json!({"file_path": "x.md"}),
+        });
+        match h.messages.last().unwrap() {
+            ChatMessage::Assistant { tools, .. } => {
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tools[0].name, "Edit");
+            }
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_api_retry_emits_system_message() {
+        let mut h = ChatHistory::default();
+        h.apply(ChatEvent::ApiRetry {
+            attempt: 1,
+            max_retries: 3,
+            error: "rate_limit".into(),
+        });
+        assert!(matches!(
+            h.messages.last(),
+            Some(ChatMessage::System(SystemMessage::ApiRetry { .. }))
+        ));
+    }
+
+    #[test]
+    fn apply_result_success_is_silent() {
+        let mut h = ChatHistory::default();
+        h.apply(ChatEvent::Result {
+            subtype: "success".into(),
+            total_cost_usd: Some(0.05),
+            terminal_reason: Some("completed".into()),
+        });
+        assert!(h.messages.is_empty());
+    }
+
+    #[test]
+    fn apply_result_failure_emits_system_message() {
+        let mut h = ChatHistory::default();
+        h.apply(ChatEvent::Result {
+            subtype: "error_max_turns".into(),
+            total_cost_usd: None,
+            terminal_reason: None,
+        });
+        assert!(matches!(
+            h.messages.last(),
+            Some(ChatMessage::System(SystemMessage::ResultError { .. }))
+        ));
+    }
+
+    #[test]
+    fn apply_init_and_unknown_are_no_ops() {
+        let mut h = ChatHistory::default();
+        h.apply(ChatEvent::Init {
+            session_id: "s".into(),
+        });
+        h.apply(ChatEvent::Unknown {
+            event_type: "future_event".into(),
+        });
+        assert!(h.messages.is_empty());
     }
 
     #[test]
