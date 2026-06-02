@@ -14,20 +14,22 @@ use crate::chat::history::{ChatHistory, ChatMessage, SystemMessage, ToolBlock};
 /// button click or plain Enter. The view stays decoupled from the session
 /// module: the callback owns the stdin write and history update.
 ///
-/// `on_cancel` runs when the user clicks 中断. Wired in Phase 3.6.
+/// The 中断 button is rendered but permanently disabled: claude CLI 2.1
+/// does not expose a mid-turn interrupt over stdin (see `docs/chat.md` §10
+/// and GitHub issue anthropics/claude-code#41665, closed as duplicate).
+/// We show the button for visual continuity and explain via tooltip.
 pub fn show(
     ui: &mut egui::Ui,
     history: &mut ChatHistory,
     session_alive: bool,
     on_send: &mut dyn FnMut(String),
-    on_cancel: &mut dyn FnMut(),
 ) {
     let frame_id = ui.id().with("chat_pane_root");
     egui::Panel::bottom(frame_id.with("input"))
         .resizable(false)
         .min_size(72.0)
         .show_inside(ui, |ui| {
-            input_row(ui, history, session_alive, on_send, on_cancel);
+            input_row(ui, history, session_alive, on_send);
         });
 
     egui::ScrollArea::vertical()
@@ -50,7 +52,6 @@ fn input_row(
     history: &mut ChatHistory,
     session_alive: bool,
     on_send: &mut dyn FnMut(String),
-    on_cancel: &mut dyn FnMut(),
 ) {
     ui.horizontal_top(|ui| {
         let buttons_width = 88.0;
@@ -86,9 +87,15 @@ fn input_row(
             {
                 submit = true;
             }
-            if ui.button("中断").clicked() {
-                on_cancel();
-            }
+            // 中断 is permanently disabled in MVP: claude CLI 2.1 has no
+            // mid-turn interrupt over stdin (see docs/chat.md §10). We keep
+            // the button so the layout is stable when upstream lands the
+            // feature; the tooltip tells the user why it's greyed out.
+            ui.add_enabled(false, egui::Button::new("中断"))
+                .on_disabled_hover_text(
+                    "Claude CLI 2.1 は応答中の中断に対応していません。\
+                     応答完了までお待ちください。",
+                );
         });
 
         if submit {

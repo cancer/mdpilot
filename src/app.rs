@@ -126,29 +126,15 @@ impl eframe::App for App {
         // play at a time.
         let session_alive = self.session.is_some();
         let mut send_text: Option<String> = None;
-        let mut cancel_requested = false;
         {
             let mut on_send = |text: String| {
                 send_text = Some(text);
             };
-            let mut on_cancel = || {
-                cancel_requested = true;
-            };
-            crate::ui::layout::show(
-                ui,
-                &mut self.chat,
-                session_alive,
-                &mut on_send,
-                &mut on_cancel,
-            );
+            crate::ui::layout::show(ui, &mut self.chat, session_alive, &mut on_send);
         }
 
         if let Some(text) = send_text {
             self.handle_send(text);
-        }
-        if cancel_requested {
-            // Phase 3.6: SIGINT / RPC abort. Until then, just log.
-            tracing::info!("中断 clicked — interrupt mechanism is Phase 3.6");
         }
 
         #[cfg(debug_assertions)]
