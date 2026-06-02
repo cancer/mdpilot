@@ -37,7 +37,18 @@ pub fn show(
         .stick_to_bottom(true)
         .show(ui, |ui| {
             if history.messages.is_empty() {
-                ui.weak("Claude にメッセージを送ると、ここに会話履歴が表示されます。");
+                // Empty-state hint isn't message content, so opt out of
+                // selection — keeps the F-05 "no default dependence" claim
+                // honest for every label this view renders.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "Claude にメッセージを送ると、ここに会話履歴が表示されます。",
+                        )
+                        .weak(),
+                    )
+                    .selectable(false),
+                );
                 return;
             }
             for message in &history.messages {
@@ -142,17 +153,17 @@ pub(crate) fn extract_send_enter(events: &mut Vec<egui::Event>) -> bool {
 fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
     match message {
         ChatMessage::User { text } => {
-            ui.label(egui::RichText::new("User").strong());
-            ui.label(text);
+            ui.add(header_label("User"));
+            ui.add(body_label(text));
         }
         ChatMessage::Assistant {
             text,
             tools,
             message_id: _,
         } => {
-            ui.label(egui::RichText::new("Assistant").strong());
+            ui.add(header_label("Assistant"));
             if !text.is_empty() {
-                ui.label(text);
+                ui.add(body_label(text));
             }
             for tool in tools {
                 render_tool(ui, tool);
@@ -162,50 +173,87 @@ fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
     }
 }
 
+/// "User" / "Assistant" / "Input" / "Output" — structural markers. Non-
+/// selectable so dragging across messages copies just the bodies, not the
+/// role prefix. The user pays the same Cmd+C and gets a clean transcript.
+fn header_label(text: &str) -> egui::Label {
+    egui::Label::new(egui::RichText::new(text).strong()).selectable(false)
+}
+
+/// Message body text — explicitly selectable so the F-05 contract doesn't
+/// depend on egui's `style.interaction.selectable_labels = true` default
+/// staying true in a future version (or a user theme).
+fn body_label(text: &str) -> egui::Label {
+    egui::Label::new(text).selectable(true)
+}
+
 fn render_tool(ui: &mut egui::Ui, tool: &ToolBlock) {
     egui::CollapsingHeader::new(format!("⚙ {}", tool.name))
         .id_salt(format!("tool_{}", tool.id))
         .default_open(false)
         .show(ui, |ui| {
-            ui.label(egui::RichText::new("Input").weak());
-            ui.code(format!("{:#}", tool.input));
+            ui.add(egui::Label::new(egui::RichText::new("Input").weak()).selectable(false));
+            ui.add(
+                egui::Label::new(egui::RichText::new(format!("{:#}", tool.input)).code())
+                    .selectable(true),
+            );
             if let Some(output) = &tool.output {
-                ui.label(egui::RichText::new("Output").weak());
-                ui.code(output);
+                ui.add(egui::Label::new(egui::RichText::new("Output").weak()).selectable(false));
+                ui.add(egui::Label::new(egui::RichText::new(output).code()).selectable(true));
             } else {
-                ui.weak("(出力待ち…)");
+                ui.add(
+                    egui::Label::new(egui::RichText::new("(出力待ち…)").weak()).selectable(false),
+                );
             }
         });
 }
 
 fn render_system(ui: &mut egui::Ui, system: &SystemMessage) {
+    // System messages (errors, retries) stay selectable so the user can
+    // copy error text into a bug report or search.
     match system {
         SystemMessage::ApiRetry {
             attempt,
             max_retries,
             error,
         } => {
-            ui.colored_label(
-                egui::Color32::from_rgb(220, 180, 70),
-                format!("API リトライ中: {error} ({attempt}/{max_retries})"),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "API リトライ中: {error} ({attempt}/{max_retries})"
+                    ))
+                    .color(egui::Color32::from_rgb(220, 180, 70)),
+                )
+                .selectable(true),
             );
         }
         SystemMessage::ResultError { subtype } => {
-            ui.colored_label(
-                egui::Color32::from_rgb(220, 90, 80),
-                format!("Claude のレスポンスがエラーで終了しました: {subtype}"),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "Claude のレスポンスがエラーで終了しました: {subtype}"
+                    ))
+                    .color(egui::Color32::from_rgb(220, 90, 80)),
+                )
+                .selectable(true),
             );
         }
         SystemMessage::Disconnected => {
-            ui.colored_label(
-                egui::Color32::from_rgb(220, 90, 80),
-                "Claude セッションが切断されました。",
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("Claude セッションが切断されました。")
+                        .color(egui::Color32::from_rgb(220, 90, 80)),
+                )
+                .selectable(true),
             );
         }
         SystemMessage::SpawnFailed { error } => {
-            ui.colored_label(
-                egui::Color32::from_rgb(220, 90, 80),
-                format!("Claude を起動できませんでした: {error}"),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("Claude を起動できませんでした: {error}"))
+                        .color(egui::Color32::from_rgb(220, 90, 80)),
+                )
+                .selectable(true),
             );
         }
     }
