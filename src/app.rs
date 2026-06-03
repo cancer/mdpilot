@@ -15,7 +15,7 @@ use crate::preview::render::{PreviewState, PreviewStatus};
 use crate::preview::watcher::{
     self, FileWatchEvent, FileWatcher, ProjectWatcher, ReloadStep, FOLLOW_DEBOUNCE, RELOAD_DEBOUNCE,
 };
-use crate::project::ProjectInit;
+use crate::project::{self, ProjectInit};
 
 pub struct App {
     chat: ChatHistory,
@@ -77,7 +77,7 @@ impl App {
             }
         };
 
-        let preview = preview_state_from_env();
+        let preview = initial_preview_state(&project);
 
         let (watcher, watch_events_rx, mut startup_watch_error) = match start_watcher(&cc.egui_ctx)
         {
@@ -545,21 +545,32 @@ impl App {
     }
 }
 
-/// Pre-loads a preview file from `MDPILOT_PREVIEW_FILE` if set. This is
-/// a Phase 4.2 dev hook — the real entry path is `mdpilot <file>` in
-/// Phase 6.1 / `Cmd+O` in Phase 7.1. The env-var path lets us drive the
-/// renderer without those UI surfaces yet.
-fn preview_state_from_env() -> PreviewState {
-    let Ok(raw) = std::env::var("MDPILOT_PREVIEW_FILE") else {
+/// Build the initial `PreviewState` from a resolved `ProjectInit`.
+/// Phase 6.4 priority order (docs/preview.md §9.1):
+///
+/// 1. `init.initial_file` — the user spelled out a file on the
+///    command line.
+/// 2. A `README.md` (case-insensitive) directly under `init.root`.
+/// 3. Empty pane. Auto-follow (Phase 6.3) can still populate it
+///    once a `.md` lands anywhere under the root.
+///
+/// Load failures fall through to `set_error` so the user sees what
+/// happened (e.g., the file existed at canonicalize time but became
+/// unreadable seconds later).
+fn initial_preview_state(project: &ProjectInit) -> PreviewState {
+    let Some(path) = project::initial_preview(project) else {
         return PreviewState::default();
     };
-    let path = PathBuf::from(&raw);
     match loader::load_markdown(&path) {
         Ok(document) => PreviewState::loaded(document),
         Err(error) => {
-            tracing::warn!(path = %raw, ?error, "failed to load MDPILOT_PREVIEW_FILE");
+            tracing::warn!(
+                path = %path.display(),
+                ?error,
+                "failed to load initial preview target",
+            );
             let mut state = PreviewState::default();
-            state.set_error(raw, error);
+            state.set_error(path.to_string_lossy().into_owned(), error);
             state
         }
     }
