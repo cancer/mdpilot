@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui;
@@ -6,9 +7,12 @@ use uuid::Uuid;
 use crate::chat::history::{ChatHistory, SystemMessage};
 use crate::chat::session::{ChatSession, SpawnOptions};
 use crate::chat::stream::ChatEvent;
+use crate::preview::loader;
+use crate::preview::render::PreviewState;
 
 pub struct App {
     chat: ChatHistory,
+    preview: PreviewState,
     session: Option<ChatSession>,
     events_rx: Option<Receiver<ChatEvent>>,
     disconnect_announced: bool,
@@ -32,8 +36,11 @@ impl App {
             }
         };
 
+        let preview = preview_state_from_env();
+
         Self {
             chat,
+            preview,
             session,
             events_rx,
             disconnect_announced: false,
@@ -93,6 +100,26 @@ impl App {
     }
 }
 
+/// Pre-loads a preview file from `MDPILOT_PREVIEW_FILE` if set. This is
+/// a Phase 4.2 dev hook — the real entry path is `mdpilot <file>` in
+/// Phase 6.1 / `Cmd+O` in Phase 7.1. The env-var path lets us drive the
+/// renderer without those UI surfaces yet.
+fn preview_state_from_env() -> PreviewState {
+    let Ok(raw) = std::env::var("MDPILOT_PREVIEW_FILE") else {
+        return PreviewState::default();
+    };
+    let path = PathBuf::from(&raw);
+    match loader::load_markdown(&path) {
+        Ok(document) => PreviewState::loaded(document),
+        Err(error) => {
+            tracing::warn!(path = %raw, ?error, "failed to load MDPILOT_PREVIEW_FILE");
+            let mut state = PreviewState::default();
+            state.set_error(raw, error);
+            state
+        }
+    }
+}
+
 /// Spawn the claude child process with cwd = current working directory and a
 /// fresh session id. Returns the session and the receiver half of the event
 /// channel. Phase 6 will replace `current_dir()` with the resolved project
@@ -130,7 +157,13 @@ impl eframe::App for App {
             let mut on_send = |text: String| {
                 send_text = Some(text);
             };
-            crate::ui::layout::show(ui, &mut self.chat, session_alive, &mut on_send);
+            crate::ui::layout::show(
+                ui,
+                &mut self.chat,
+                &mut self.preview,
+                session_alive,
+                &mut on_send,
+            );
         }
 
         if let Some(text) = send_text {

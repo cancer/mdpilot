@@ -1,7 +1,7 @@
 use eframe::egui;
 
-pub fn show(ui: &mut egui::Ui) {
-    ui.centered_and_justified(|ui| {
-        ui.label("プレビュー未指定");
-    });
+use crate::preview::render::PreviewState;
+
+pub fn show(ui: &mut egui::Ui, state: &mut PreviewState) {
+    crate::preview::render::show(ui, state);
 }
