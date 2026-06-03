@@ -7,8 +7,9 @@ use uuid::Uuid;
 use crate::chat::history::{ChatHistory, SystemMessage};
 use crate::chat::session::{ChatSession, SpawnOptions};
 use crate::chat::stream::ChatEvent;
+use crate::preview::link::{self, LinkAction};
 use crate::preview::loader;
-use crate::preview::render::PreviewState;
+use crate::preview::render::{PreviewState, PreviewStatus};
 
 pub struct App {
     chat: ChatHistory,
@@ -71,6 +72,79 @@ impl App {
                 if !self.disconnect_announced {
                     self.chat.push_system(SystemMessage::Disconnected);
                     self.disconnect_announced = true;
+                }
+            }
+        }
+    }
+
+    /// Take ownership of every `OutputCommand::OpenUrl` egui_commonmark
+    /// posted during the just-completed UI pass and dispatch it through
+    /// our link policy (`docs/preview.md` §5). Other output commands
+    /// (CopyText / CopyImage) are left in place for eframe to handle.
+    ///
+    /// Must run *after* `layout::show` so the link clicks have already
+    /// posted their commands, and *before* eframe finalizes the frame
+    /// (which would otherwise dispatch every URL via the default
+    /// open-in-browser path).
+    fn dispatch_link_clicks(&mut self, ctx: &egui::Context) {
+        let clicked_urls: Vec<String> = ctx.output_mut(|o| {
+            let mut clicked = Vec::new();
+            o.commands.retain(|cmd| match cmd {
+                egui::OutputCommand::OpenUrl(open_url) => {
+                    clicked.push(open_url.url.clone());
+                    false
+                }
+                _ => true,
+            });
+            clicked
+        });
+
+        for url in clicked_urls {
+            self.handle_link_click(ctx, &url);
+        }
+    }
+
+    fn handle_link_click(&mut self, ctx: &egui::Context, href: &str) {
+        let current_dir = match &self.preview.status {
+            PreviewStatus::Loaded { document, .. } => {
+                document.path.parent().map(|p| p.to_path_buf())
+            }
+            _ => None,
+        };
+        let action = link::classify(href, current_dir.as_deref());
+        match action {
+            LinkAction::Empty => {}
+            LinkAction::Anchor { fragment } => {
+                // egui_commonmark doesn't expose per-heading anchors
+                // yet; logging keeps the click traceable until Phase 9.
+                tracing::info!(fragment = %fragment, "anchor link click (MVP no-op)");
+            }
+            LinkAction::External { url } => {
+                // Re-post via egui so eframe's webbrowser path handles
+                // it — that's what we drained from in the first place.
+                ctx.open_url(egui::OpenUrl::new_tab(url));
+            }
+            LinkAction::SwitchMarkdown { path } => {
+                let label = path.to_string_lossy().into_owned();
+                match loader::load_markdown(&path) {
+                    Ok(document) => self.preview.set_document(document),
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %label,
+                            ?error,
+                            "failed to switch preview target",
+                        );
+                        self.preview.set_error(label, error);
+                    }
+                }
+            }
+            LinkAction::OpenWithOsApp { path } => {
+                if let Err(err) = open::that(&path) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "OS open failed",
+                    );
                 }
             }
         }
@@ -169,6 +243,11 @@ impl eframe::App for App {
         if let Some(text) = send_text {
             self.handle_send(text);
         }
+
+        // Intercept link clicks before eframe's end-of-frame URL
+        // dispatch so we can apply the docs/preview.md §5 policy
+        // (route .md to set_document, other paths to OS open, etc.).
+        self.dispatch_link_clicks(ui.ctx());
 
         #[cfg(debug_assertions)]
         if let Some(cap) = self.debug_screenshot.as_mut() {
