@@ -54,6 +54,11 @@ pub struct App {
     /// path and the deadline so we always follow the most-recent
     /// write.
     pending_follow: Option<(PathBuf, Instant)>,
+    /// Canonical project root from Phase 6.1's `project::resolve`.
+    /// Held for the `Cmd+O` file dialog's initial directory (Phase
+    /// 7.1) and as the fallback when the current preview has no
+    /// usable parent directory.
+    project_root: PathBuf,
     /// `--enable-dev-tools` runtime opt-in. The dev surface (currently
     /// only the `MDPILOT_DEBUG_SCREENSHOT` capture) only activates
     /// when this flag is set and the env var is present. Default
@@ -126,6 +131,7 @@ impl App {
             _project_watcher: project_watcher,
             project_events_rx,
             pending_follow: None,
+            project_root: project.root.clone(),
             debug_screenshot: DebugScreenshot::from_env(cli),
         };
         app.sync_watch_target();
@@ -639,6 +645,75 @@ impl App {
         }
         pressed
     }
+
+    /// `docs/ui.md` §6.2: `Cmd+O` (mac) / `Ctrl+O` (Win/Linux) opens
+    /// a native file picker filtered to Markdown. The picker call
+    /// `rfd::FileDialog::pick_file()` is synchronous — on macOS the
+    /// egui frame loop pauses while the dialog is up, which matches
+    /// the OS-wide convention that file dialogs block.
+    ///
+    /// On selection, the chosen path goes through the same load path
+    /// as a link-driven `SwitchMarkdown`: load, set_document, drop
+    /// any pending reload / follow, then re-bind the watcher.
+    ///
+    /// Phase 7.2 will add the auto-follow ON/OFF flag and turn it
+    /// OFF on a successful pick (per `docs/preview.md` §9.1.1). For
+    /// now we just clear the one-shot `pending_follow` so a
+    /// project event captured *just before* the dialog dismissal
+    /// doesn't snap the preview away from the file the user picked.
+    fn consume_open_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if !pressed {
+            return false;
+        }
+
+        let start_dir = self.file_picker_start_dir();
+        let picked = rfd::FileDialog::new()
+            .add_filter("Markdown", &["md", "markdown"])
+            .set_directory(&start_dir)
+            .pick_file();
+
+        let Some(path) = picked else {
+            // User dismissed without selecting — nothing to do.
+            return true;
+        };
+
+        let label = path.to_string_lossy().into_owned();
+        match loader::load_markdown(&path) {
+            Ok(document) => {
+                self.preview.set_document(document);
+                self.watcher_error = None;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %label,
+                    ?error,
+                    "Cmd+O target failed to load",
+                );
+                self.preview.set_error(label, error);
+            }
+        }
+        // Both pending timers were tied to the *previous* preview
+        // target; neither applies after a user-driven switch.
+        self.pending_reload = None;
+        self.pending_follow = None;
+        self.sync_watch_target();
+        true
+    }
+
+    /// Pick the directory the file dialog should open in. Prefer the
+    /// currently-shown file's parent, fall back to the project root.
+    fn file_picker_start_dir(&self) -> PathBuf {
+        match &self.preview.status {
+            PreviewStatus::Loaded { document, .. } => document
+                .path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| self.project_root.clone()),
+            _ => self.project_root.clone(),
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -649,6 +724,7 @@ impl eframe::App for App {
         self.poll_pending_reload(ctx);
         self.poll_pending_follow(ctx);
         self.consume_reload_shortcut(ctx);
+        self.consume_open_shortcut(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

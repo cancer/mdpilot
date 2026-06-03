@@ -24,6 +24,13 @@ egui_commonmark = { version = "0.23", features = [
 # itself, so we don't spawn an extra std::thread for it.
 notify = "8"
 open = "5"
+# Native file-picker dialog used by `Cmd+O` / `Ctrl+O` (Phase 7.1).
+# `default-features = false` skips the Linux xdg-portal / wayland deps
+# until Linux support lands (Phase 8 is macOS + Windows only). The
+# remaining surface is `rfd::FileDialog` on the synchronous blocking
+# path, which we wrap in a thread + mpsc channel so the UI never
+# stalls while the dialog is open.
+rfd = { version = "0.17", default-features = false }
 # Used directly to scan markdown for image events and rewrite relative
 # URIs (Phase 4.5). egui_commonmark already pulls in 0.13 transitively,
 # so cargo unifies on a single compilation. Match the egui_commonmark
