@@ -14,6 +14,7 @@
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
+use crate::preview::image::rewrite_image_uris;
 use crate::preview::loader::{LoadError, LoadedDocument, SizeClass, SOFT_LIMIT_BYTES};
 
 /// syntect theme used in dark mode. Bundled with syntect's
@@ -79,16 +80,33 @@ impl PreviewState {
 }
 
 /// Build the post-processed text we hand to egui_commonmark, or `None`
-/// when the raw `document.text` is fine to render as-is. For
-/// `SizeClass::Large` documents we strip every fenced code block's
-/// info-string so each block falls through egui_commonmark's
-/// `plain_highlighting` path instead of syntect — see
-/// `docs/preview.md` §4 (MVP fallback is per-file, not per-block).
+/// when the raw `document.text` is fine to render as-is. Two transforms
+/// stack here:
+///
+/// 1. **Image URI rewriting** (Phase 4.5, `docs/preview.md` §6) — every
+///    inline image with a relative or absolute filesystem URL is
+///    rewritten into `file://<absolute>` form, resolved against
+///    `document.path.parent()`. External (`http(s)://`, `data:`, …)
+///    URLs are untouched.
+/// 2. **Large-doc code fence stripping** (`docs/preview.md` §4) — for
+///    `SizeClass::Large` docs we strip every fenced code block's
+///    info-string so each block falls through egui_commonmark's
+///    `plain_highlighting` path instead of syntect.
+///
+/// The two transforms compose: rewrite first so the stripped output
+/// preserves the resolved image URIs.
 fn render_override_for(document: &LoadedDocument) -> Option<String> {
-    if document.size_class == SizeClass::Large {
-        Some(strip_code_block_info_strings(&document.text))
+    let base_dir = document.path.parent();
+    let rewritten = rewrite_image_uris(&document.text, base_dir);
+    let processed = if document.size_class == SizeClass::Large {
+        strip_code_block_info_strings(&rewritten)
     } else {
+        rewritten
+    };
+    if processed == document.text {
         None
+    } else {
+        Some(processed)
     }
 }
 
@@ -397,8 +415,12 @@ mod tests {
     #[test]
     fn set_document_transitions_state() {
         let mut state = PreviewState::default();
+        // Use an absolute path so a future maintainer adding an image
+        // to this fixture sees a well-formed `file:///abs/...` URI,
+        // not the partially-resolved `file://img.png` that `a.md`'s
+        // empty parent would produce.
         let doc = LoadedDocument {
-            path: PathBuf::from("a.md"),
+            path: PathBuf::from("/tmp/a.md"),
             text: "# A".into(),
             size_bytes: 3,
             size_class: SizeClass::Small,
@@ -435,6 +457,66 @@ mod tests {
                 rendered_text_override.is_none(),
                 "Small docs should render raw text",
             ),
+            other => panic!("expected Loaded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn small_documents_with_relative_images_get_rewritten() {
+        // Phase 4.5: relative image URIs must be rewritten even for
+        // Small docs, because that's the only path egui_extras can
+        // resolve against an absolute filesystem location.
+        let state = PreviewState::loaded(LoadedDocument {
+            path: PathBuf::from("/proj/docs/intro.md"),
+            text: "see ![diagram](images/x.png)".into(),
+            size_bytes: 32,
+            size_class: SizeClass::Small,
+        });
+        match state.status {
+            PreviewStatus::Loaded {
+                rendered_text_override,
+                ..
+            } => {
+                let rendered =
+                    rendered_text_override.expect("relative image must trigger the override");
+                assert!(
+                    rendered.contains("file:///proj/docs/images/x.png"),
+                    "image URI must be absolute file:// URI: {rendered}",
+                );
+            }
+            other => panic!("expected Loaded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn large_documents_compose_image_rewrite_and_fence_strip() {
+        // Phase 4.5: both transforms should stack — relative image URI
+        // resolved to file:// AND the code-block info-string stripped.
+        let state = PreviewState::loaded(LoadedDocument {
+            path: PathBuf::from("/proj/big.md"),
+            text: "![](logo.png)\n\n```rust\nfn x() {}\n```\n".into(),
+            size_bytes: 2 * 1024 * 1024,
+            size_class: SizeClass::Large,
+        });
+        match state.status {
+            PreviewStatus::Loaded {
+                rendered_text_override,
+                ..
+            } => {
+                let rendered = rendered_text_override.expect("Large doc must override");
+                assert!(
+                    rendered.contains("file:///proj/logo.png"),
+                    "image must be rewritten: {rendered}",
+                );
+                assert!(
+                    rendered.contains("```\nfn x"),
+                    "info-string must be stripped: {rendered}",
+                );
+                assert!(
+                    !rendered.contains("```rust"),
+                    "info-string `rust` must be gone: {rendered}",
+                );
+            }
             other => panic!("expected Loaded, got {other:?}"),
         }
     }

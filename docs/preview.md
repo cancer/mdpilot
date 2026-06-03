@@ -84,12 +84,17 @@
 
 | 種別 | 挙動 |
 |---|---|
-| HTTP/HTTPS URL | **MVP では非対応**（表示しない、代替テキストのみ表示）。理由：ネットワーク I/O とキャッシュ管理が増えるため |
-| ローカル相対パス | プレビューファイルのディレクトリ基準で読み込み、画像として表示 |
-| ローカル絶対パス | 同上 |
-| `data:` URL | 対応（egui の画像 API による） |
-| サポートフォーマット | PNG / JPEG / GIF（静止）/ WebP / SVG（egui の対応に従う） |
-| 不在ローカルファイル | 警告アイコン（△）のみが描画される。代替テキスト（alt）は表示されない（`docs/spike-report.md` 0.5.2 で確認）。MVP の挙動として許容、ユーザーには「画像が見つからない」ことが直感的に伝わる |
+| HTTP/HTTPS URL | **MVP では非対応**。`egui_commonmark` の `fetch` feature を有効化しないため egui_extras の HTTP loader 自体が組み込まれず、結果として警告アイコン（⚠）のみが描画される（spike-report §0.5.2 で確認した不在ファイル時と同じ表示）。代替テキストは出ない |
+| ローカル相対パス | `src/preview/image.rs::rewrite_image_uris` でプレビューファイルのディレクトリ基準で絶対化し、`file://<abs>` URI を egui_commonmark に渡す。pulldown-cmark で image event を抽出 → 元 URL を `dest_url.rfind` で source 中に再発見 → 該当範囲を `file://...` で置換 |
+| ローカル絶対パス | Unix `/...` および Windows `C:\...` / `C:/...` を `is_windows_absolute` で判定し、base_dir に依らず `file://<abs>` 化 |
+| `data:` URL | `egui_commonmark` の `embedded_image` feature 経由で `data_url_loader` が処理する。書き換え対象から除外 |
+| サポートフォーマット（MVP）| PNG / JPEG / SVG / `data:` URL。`Cargo.toml` で `egui_commonmark` features に `svg` と `embedded_image` を有効化、`image` クレートに `png` + `jpeg` を有効化（cargo の feature unification で egui_extras 側も同じ設定が使われる）。GIF / WebP は egui_extras の追加 loader feature が必要なため MVP では対応せず Phase 9.1 で検討 |
+| 不在ローカルファイル | 警告アイコン（⚠）のみが描画される。代替テキスト（alt）は表示されない（`docs/spike-report.md` 0.5.2 で確認）。MVP の挙動として許容 |
+
+書き換えの既知の限界（MVP 妥協）:
+
+- `pulldown-cmark` は image の `dest_url` をアンエスケープして返す（`\(` → `(`、`&amp;` → `&` 等）ため、source 中に同じバイト列が見つからないと書き換えを諦めて元 URL のまま egui_commonmark に渡す。結果としてエスケープ・HTML entity を含む相対 URL は描画されない（警告アイコンのみ）。Phase 9.1 で精緻化する余地あり
+- Reference style（`![alt][ref]` + 別箇所の `[ref]: url`）も pulldown-cmark が dest_url を返すため対象になるが、参照定義側の URL のみが書き換えられる挙動は未検証
 
 ローカル画像の自動リロード：プレビュー対象 `.md` ファイルだけでなく、参照される画像ファイルの変更も検出してリロードするかは未確定（MVP では `.md` 更新時にすべて再読込）。
 
