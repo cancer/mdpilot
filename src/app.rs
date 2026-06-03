@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Instant;
 
 use eframe::egui;
 use uuid::Uuid;
@@ -8,8 +9,9 @@ use crate::chat::history::{ChatHistory, SystemMessage};
 use crate::chat::session::{ChatSession, SpawnOptions};
 use crate::chat::stream::ChatEvent;
 use crate::preview::link::{self, LinkAction};
-use crate::preview::loader;
+use crate::preview::loader::{self, LoadError};
 use crate::preview::render::{PreviewState, PreviewStatus};
+use crate::preview::watcher::{self, FileWatchEvent, FileWatcher, ReloadStep, RELOAD_DEBOUNCE};
 
 pub struct App {
     chat: ChatHistory,
@@ -17,6 +19,18 @@ pub struct App {
     session: Option<ChatSession>,
     events_rx: Option<Receiver<ChatEvent>>,
     disconnect_announced: bool,
+    /// Filesystem watcher for the current preview target. `None` only
+    /// when `FileWatcher::start` failed at construction (extremely
+    /// unusual — would mean the platform notify backend itself is
+    /// unavailable). Reload via `notify` is a best-effort feature, so
+    /// a missing watcher does not block other UI work.
+    watcher: Option<FileWatcher>,
+    watch_events_rx: Option<Receiver<FileWatchEvent>>,
+    /// Deadline (Instant) at which the debounced reload should fire.
+    /// `Some` while we're inside the 100 ms quiet window after the
+    /// last `Changed` event for the current preview target. Cleared
+    /// after the reload runs.
+    pending_reload: Option<Instant>,
     #[cfg(debug_assertions)]
     debug_screenshot: Option<DebugScreenshot>,
 }
@@ -39,15 +53,168 @@ impl App {
 
         let preview = preview_state_from_env();
 
-        Self {
+        let (watcher, watch_events_rx) = match start_watcher(&cc.egui_ctx) {
+            Ok((w, rx)) => (Some(w), Some(rx)),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to start file watcher (auto-reload disabled)");
+                (None, None)
+            }
+        };
+
+        let mut app = Self {
             chat,
             preview,
             session,
             events_rx,
             disconnect_announced: false,
+            watcher,
+            watch_events_rx,
+            pending_reload: None,
             #[cfg(debug_assertions)]
             debug_screenshot: DebugScreenshot::from_env(),
+        };
+        app.sync_watch_target();
+        app
+    }
+
+    /// Adjust the file-watcher subscription so it tracks exactly the
+    /// path that `preview` currently displays. Called whenever the
+    /// preview target changes (startup load, link-driven switch, or
+    /// reload). On `Empty` / `Failed` we keep no watches so we don't
+    /// spam tracing on a missing-file scenario.
+    fn sync_watch_target(&mut self) {
+        let Some(watcher) = self.watcher.as_mut() else {
+            return;
+        };
+        watcher.unwatch_all();
+        if let PreviewStatus::Loaded { document, .. } = &self.preview.status {
+            if let Err(err) = watcher.watch(&document.path) {
+                tracing::warn!(
+                    path = %document.path.display(),
+                    error = %err,
+                    "failed to attach file watcher",
+                );
+            }
         }
+    }
+
+    /// Drain any pending `FileWatchEvent`s and update reload bookkeeping.
+    /// `Changed` events arm / re-arm the 100 ms debounce window so a
+    /// burst of writes (atomic-save editors emit Create + Modify within
+    /// a few ms) collapses into one reload. `Removed` is acted on
+    /// immediately because the user benefit of the "見つかりません"
+    /// banner is highest right at the deletion moment.
+    ///
+    /// Event drain runs in two passes (collect-then-apply) because
+    /// `handle_removed` mutates `self` while `try_recv` is borrowing
+    /// `self.watch_events_rx`. Collecting first sidesteps that.
+    fn drain_watch_events(&mut self, ctx: &egui::Context) {
+        let events = self.collect_watch_events();
+        if events.is_empty() {
+            return;
+        }
+        let current_path = match &self.preview.status {
+            PreviewStatus::Loaded { document, .. } => Some(document.path.clone()),
+            _ => None,
+        };
+        for event in events {
+            match event {
+                FileWatchEvent::Changed { path } => {
+                    if let Some(current) = current_path.as_deref() {
+                        if watcher::paths_match(&path, current) {
+                            self.pending_reload = Some(Instant::now() + RELOAD_DEBOUNCE);
+                            ctx.request_repaint_after(RELOAD_DEBOUNCE);
+                        }
+                    }
+                }
+                FileWatchEvent::Removed { path } => {
+                    if let Some(current) = current_path.as_deref() {
+                        if watcher::paths_match(&path, current) {
+                            self.handle_removed(current.to_path_buf());
+                        }
+                    }
+                }
+                FileWatchEvent::Error(message) => {
+                    tracing::warn!(message = %message, "file watcher error");
+                }
+            }
+        }
+    }
+
+    /// First half of the drain: pull every available event off the
+    /// receiver into a Vec without touching the rest of `self`.
+    fn collect_watch_events(&mut self) -> Vec<FileWatchEvent> {
+        let mut out = Vec::new();
+        let Some(rx) = self.watch_events_rx.as_ref() else {
+            return out;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok(event) => out.push(event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    // Watcher dropped before App — should not happen
+                    // in normal flow, but guard so we don't spin on a
+                    // dead receiver every frame.
+                    self.watch_events_rx = None;
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// If a debounce window has elapsed, reload the preview target from
+    /// disk and clear the deadline. Called after `drain_watch_events`
+    /// so a brand-new `Changed` arriving this frame still gets the full
+    /// quiet window.
+    fn poll_pending_reload(&mut self, ctx: &egui::Context) {
+        match watcher::reload_decision(self.pending_reload, Instant::now()) {
+            ReloadStep::Idle => {}
+            ReloadStep::Wait { remaining } => ctx.request_repaint_after(remaining),
+            ReloadStep::Fire => {
+                self.pending_reload = None;
+                self.reload_current();
+            }
+        }
+    }
+
+    /// Re-read the current preview path from disk and update state.
+    /// `set_document` keeps the document path stable, so the watcher
+    /// subscription does not need to change for a reload.
+    fn reload_current(&mut self) {
+        let Some(path) = (match &self.preview.status {
+            PreviewStatus::Loaded { document, .. } => Some(document.path.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        match loader::load_markdown(&path) {
+            Ok(document) => self.preview.set_document(document),
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    ?error,
+                    "auto-reload failed; surfacing as preview error",
+                );
+                self.preview
+                    .set_error(path.to_string_lossy().into_owned(), error);
+            }
+        }
+    }
+
+    fn handle_removed(&mut self, path: PathBuf) {
+        let label = path.to_string_lossy().into_owned();
+        self.preview.set_error(label, LoadError::NotFound);
+        // Cancel any pending Changed-triggered reload — the file is
+        // gone, no point reloading.
+        self.pending_reload = None;
+        // Keep the watch attached. On macOS FSEvents the watch is on
+        // the parent directory under the hood, so a future recreate
+        // will arrive as Changed and we'll auto-restore per
+        // docs/preview.md §7. On Linux inotify the watch may have
+        // been invalidated by the unlink; the user can recover via
+        // the manual reload added in Phase 5.3.
     }
 
     /// Write a user prompt to claude's stdin and record it in the local
@@ -137,6 +304,11 @@ impl App {
                         self.preview.set_error(label, error);
                     }
                 }
+                // Re-bind the watcher to the new target; the debounce
+                // timer (if any) targeted the old path and is no
+                // longer meaningful.
+                self.pending_reload = None;
+                self.sync_watch_target();
             }
             LinkAction::OpenWithOsApp { path } => {
                 if let Err(err) = open::that(&path) {
@@ -194,6 +366,17 @@ fn preview_state_from_env() -> PreviewState {
     }
 }
 
+/// Build the filesystem watcher and the channel App will drain each
+/// frame. The watcher itself owns its dispatcher thread; we only have
+/// to hand it a wake-up closure so the UI thread re-runs `logic()`
+/// when an event arrives.
+fn start_watcher(ctx: &egui::Context) -> notify::Result<(FileWatcher, Receiver<FileWatchEvent>)> {
+    let (tx, rx) = mpsc::channel::<FileWatchEvent>();
+    let wake_ctx = ctx.clone();
+    let watcher = FileWatcher::start(tx, move || wake_ctx.request_repaint())?;
+    Ok((watcher, rx))
+}
+
 /// Spawn the claude child process with cwd = current working directory and a
 /// fresh session id. Returns the session and the receiver half of the event
 /// channel. Phase 6 will replace `current_dir()` with the resolved project
@@ -216,8 +399,10 @@ fn spawn_session(ctx: &egui::Context) -> std::io::Result<(ChatSession, Receiver<
 }
 
 impl eframe::App for App {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_chat_events();
+        self.drain_watch_events(ctx);
+        self.poll_pending_reload(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

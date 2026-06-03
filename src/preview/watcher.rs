@@ -21,8 +21,15 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+
+/// `docs/preview.md` §7 — collapse rapid-fire writes (atomic-save
+/// editors often emit Create + Modify(Content) + Modify(Metadata)
+/// within a few ms) into a single reload after a 100 ms quiet
+/// period. Held here so App and tests share one number.
+pub const RELOAD_DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// Coarse-grained file-change notification that App cares about.
 /// One `notify::Event` may name multiple paths and one of several
@@ -151,6 +158,54 @@ impl FileWatcher {
     /// uniqueness guarantees beyond what `watch`/`unwatch` provide.
     pub fn watched_paths(&self) -> &[PathBuf] {
         &self.watched
+    }
+}
+
+/// Outcome of one polling step against the reload deadline.
+/// `Idle` when no Changed event has armed the timer, `Wait` while we
+/// are still inside the debounce window (caller should
+/// `ctx.request_repaint_after(remaining)`), `Fire` once the deadline
+/// has elapsed (caller should reload and clear the deadline).
+#[derive(Debug, PartialEq)]
+pub enum ReloadStep {
+    Idle,
+    Wait { remaining: Duration },
+    Fire,
+}
+
+/// Pure: decide what the App should do this frame given a possibly
+/// pending reload deadline. The App owns the `Option<Instant>` and
+/// passes it in; this function does not mutate state, so deciding
+/// whether to clear the deadline on `Fire` stays at the call site.
+pub fn reload_decision(deadline: Option<Instant>, now: Instant) -> ReloadStep {
+    match deadline {
+        None => ReloadStep::Idle,
+        Some(d) if now >= d => ReloadStep::Fire,
+        Some(d) => ReloadStep::Wait { remaining: d - now },
+    }
+}
+
+/// True iff `a` and `b` denote the same filesystem entity.
+///
+/// macOS FSEvents canonicalizes paths before delivery (e.g.
+/// `/private/var/...` instead of the symlink-redirected
+/// `/var/...`), so direct `==` comparison between the path we
+/// asked to watch and the path carried by an incoming event will
+/// often fail. We try exact equality first (cheap, no syscall),
+/// then fall back to `fs::canonicalize` on both sides. If both
+/// canonicalize calls fail (e.g. the file was just deleted, which
+/// is exactly when path comparison still matters), report
+/// inequality — the App will get a separate `Removed` event for
+/// the original path anyway.
+pub fn paths_match(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    let canonical_a = std::fs::canonicalize(a).ok();
+    let canonical_b = std::fs::canonicalize(b).ok();
+    match (canonical_a, canonical_b) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
     }
 }
 
@@ -338,6 +393,87 @@ mod tests {
 
         watcher.unwatch(&path).expect("unwatch");
         assert!(watcher.watched_paths().is_empty());
+    }
+
+    #[test]
+    fn reload_decision_is_idle_without_deadline() {
+        assert_eq!(reload_decision(None, Instant::now()), ReloadStep::Idle);
+    }
+
+    #[test]
+    fn reload_decision_fires_after_deadline() {
+        let now = Instant::now();
+        let past = now.checked_sub(Duration::from_millis(5)).unwrap();
+        assert_eq!(reload_decision(Some(past), now), ReloadStep::Fire);
+    }
+
+    #[test]
+    fn reload_decision_waits_before_deadline() {
+        let now = Instant::now();
+        let future = now + Duration::from_millis(30);
+        match reload_decision(Some(future), now) {
+            ReloadStep::Wait { remaining } => {
+                assert!(
+                    remaining <= Duration::from_millis(30) && remaining > Duration::from_millis(0),
+                    "remaining out of range: {remaining:?}",
+                );
+            }
+            other => panic!("expected Wait, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reload_decision_fires_exactly_at_deadline() {
+        // `now >= deadline` is inclusive — at the boundary, fire.
+        let now = Instant::now();
+        assert_eq!(reload_decision(Some(now), now), ReloadStep::Fire);
+    }
+
+    #[test]
+    fn paths_match_exact_equality_short_circuits() {
+        // No syscall hits when the strings already match — guard
+        // against a future refactor accidentally always-canonicalizing.
+        // `/etc/does-not-exist` would fail canonicalize, so equality
+        // returning true proves the short-circuit path fired.
+        let p = PathBuf::from("/etc/does-not-exist/never");
+        assert!(paths_match(&p, &p));
+    }
+
+    #[test]
+    fn paths_match_canonicalizes_symlinks() {
+        // macOS exposes the real `/private/var/...` for an
+        // FSEvents-delivered `/var/...` path; tempfile sits in
+        // `/var/folders/...` which is itself a symlink on macOS, so
+        // canonicalizing a relative reference into that directory
+        // verifies the fallback branch.
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let file = canonical.join("hit.md");
+        std::fs::write(&file, b"x").unwrap();
+        // Re-form the path with a "./" prefix; logically the same
+        // file, byte-different path string.
+        let alt = canonical.join(".").join("hit.md");
+        assert!(paths_match(&file, &alt), "{file:?} should match {alt:?}",);
+    }
+
+    #[test]
+    fn paths_match_returns_false_for_different_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.md");
+        let b = dir.path().join("b.md");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        assert!(!paths_match(&a, &b));
+    }
+
+    #[test]
+    fn paths_match_returns_false_for_missing_files() {
+        // Both paths fail canonicalize → cannot prove equality →
+        // return false. The App will see a Removed event for the
+        // original path separately, so this is safe.
+        let p1 = PathBuf::from("/does/not/exist/a");
+        let p2 = PathBuf::from("/does/not/exist/b");
+        assert!(!paths_match(&p1, &p2));
     }
 
     #[test]
