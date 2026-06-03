@@ -31,6 +31,13 @@ pub struct App {
     /// last `Changed` event for the current preview target. Cleared
     /// after the reload runs.
     pending_reload: Option<Instant>,
+    /// Last watcher-side error to surface to the user. Phase 5.3 shows
+    /// this as a banner above the preview pane until the next
+    /// successful reload clears it. The real home for this signal is
+    /// the Phase 7.7 status bar; this is a stop-gap so `docs/preview.md`
+    /// §7 ("監視開始失敗時はステータスバーにエラー表示") is at least
+    /// visually addressed in MVP.
+    watcher_error: Option<String>,
     #[cfg(debug_assertions)]
     debug_screenshot: Option<DebugScreenshot>,
 }
@@ -53,11 +60,15 @@ impl App {
 
         let preview = preview_state_from_env();
 
-        let (watcher, watch_events_rx) = match start_watcher(&cc.egui_ctx) {
-            Ok((w, rx)) => (Some(w), Some(rx)),
+        let (watcher, watch_events_rx, startup_watch_error) = match start_watcher(&cc.egui_ctx) {
+            Ok((w, rx)) => (Some(w), Some(rx), None),
             Err(err) => {
                 tracing::warn!(error = %err, "failed to start file watcher (auto-reload disabled)");
-                (None, None)
+                (
+                    None,
+                    None,
+                    Some(format!("ファイル監視を開始できません: {err}")),
+                )
             }
         };
 
@@ -70,6 +81,7 @@ impl App {
             watcher,
             watch_events_rx,
             pending_reload: None,
+            watcher_error: startup_watch_error,
             #[cfg(debug_assertions)]
             debug_screenshot: DebugScreenshot::from_env(),
         };
@@ -89,11 +101,13 @@ impl App {
         watcher.unwatch_all();
         if let PreviewStatus::Loaded { document, .. } = &self.preview.status {
             if let Err(err) = watcher.watch(&document.path) {
+                let label = document.path.display().to_string();
                 tracing::warn!(
-                    path = %document.path.display(),
+                    path = %label,
                     error = %err,
                     "failed to attach file watcher",
                 );
+                self.watcher_error = Some(format!("ファイル監視を開始できません ({label}): {err}"));
             }
         }
     }
@@ -136,6 +150,7 @@ impl App {
                 }
                 FileWatchEvent::Error(message) => {
                     tracing::warn!(message = %message, "file watcher error");
+                    self.watcher_error = Some(format!("ファイル監視エラー: {message}"));
                 }
             }
         }
@@ -181,21 +196,36 @@ impl App {
 
     /// Re-read the current preview path from disk and update state.
     /// `set_document` keeps the document path stable, so the watcher
-    /// subscription does not need to change for a reload.
+    /// subscription does not need to change for a reload. A success
+    /// clears any stale watcher-error banner.
+    ///
+    /// Reload from `Failed` (e.g. user pressed Cmd+R after a missing
+    /// file got recreated) walks through the same path: we still know
+    /// the target via `Failed::path_label`, so the spec §9 manual
+    /// recovery path works without needing a separate state machine.
     fn reload_current(&mut self) {
-        let Some(path) = (match &self.preview.status {
+        let path = match &self.preview.status {
             PreviewStatus::Loaded { document, .. } => Some(document.path.clone()),
-            _ => None,
-        }) else {
+            PreviewStatus::Failed { path_label, .. } => Some(PathBuf::from(path_label)),
+            PreviewStatus::Empty => None,
+        };
+        let Some(path) = path else {
             return;
         };
         match loader::load_markdown(&path) {
-            Ok(document) => self.preview.set_document(document),
+            Ok(document) => {
+                self.preview.set_document(document);
+                self.watcher_error = None;
+                // Re-attach the watcher in case we recovered from a
+                // missing-file state where the path may have been
+                // unwatched / re-created.
+                self.sync_watch_target();
+            }
             Err(error) => {
                 tracing::warn!(
                     path = %path.display(),
                     ?error,
-                    "auto-reload failed; surfacing as preview error",
+                    "reload failed; surfacing as preview error",
                 );
                 self.preview
                     .set_error(path.to_string_lossy().into_owned(), error);
@@ -398,11 +428,27 @@ fn spawn_session(ctx: &egui::Context) -> std::io::Result<(ChatSession, Receiver<
     Ok((session, rx))
 }
 
+impl App {
+    /// `docs/ui.md` §6.2: `Cmd+R` (mac) / `Ctrl+R` (Win/Linux) forces
+    /// the preview to reload from disk. `consume_shortcut` removes the
+    /// event from the queue so a focused `TextEdit` does not also
+    /// receive it. Returns whether the reload fired (for tests).
+    fn consume_reload_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::R);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if pressed {
+            self.reload_current();
+        }
+        pressed
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_chat_events();
         self.drain_watch_events(ctx);
         self.poll_pending_reload(ctx);
+        self.consume_reload_shortcut(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -420,6 +466,7 @@ impl eframe::App for App {
                 ui,
                 &mut self.chat,
                 &mut self.preview,
+                self.watcher_error.as_deref(),
                 session_alive,
                 &mut on_send,
             );

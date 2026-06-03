@@ -10,6 +10,7 @@ pub fn show(
     ui: &mut egui::Ui,
     history: &mut ChatHistory,
     preview: &mut PreviewState,
+    watcher_error: Option<&str>,
     session_alive: bool,
     on_send: &mut dyn FnMut(String),
 ) {
@@ -21,7 +22,7 @@ pub fn show(
         .default_size(avail / 2.0)
         .size_range(MIN_PANE_WIDTH..=max_left)
         .show_inside(ui, |ui| {
-            crate::ui::preview_pane::show(ui, preview);
+            crate::ui::preview_pane::show(ui, preview, watcher_error);
         });
 
     // Hit-strip on the right edge of the preview pane: a thin column where the
