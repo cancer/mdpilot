@@ -60,12 +60,12 @@
 
 | 項目 | 内容 |
 |---|---|
-| エンジン | `syntect`（標準） |
+| エンジン | `syntect`（`egui_commonmark` の `better_syntax_highlighting` feature 経由） |
 | シンタックス定義 | `syntect` 同梱の Sublime Text 構文ファイル |
-| テーマ | OS のダーク/ライト連動で 2 種類を持つ（既定: ダーク=`base16-ocean.dark`、ライト=`InspiredGitHub` 程度） |
+| テーマ | OS のダーク/ライト連動で 2 種類を持つ。既定: ダーク=`base16-ocean.dark`、ライト=`InspiredGitHub`（いずれも `syntect::ThemeSet::load_defaults` に含まれる）。テーマ切替は `egui_commonmark` が `ui.style().visuals.dark_mode` から判定 |
 | コードブロックの言語指定 | フェンスの info string（` ```rust ` 等）から判定 |
 | 言語指定なし | プレーンテキストとして表示 |
-| 大きなコードブロック | 1MB 以上のブロックはハイライト無効でフォールバック |
+| 大きなファイル | **ファイル全体が 1MB（`SizeClass::Large`）以上のとき、syntect ハイライトを一括無効化**（per-block ではない、MVP の妥協）。実装は `src/preview/render.rs::strip_code_block_info_strings` で全 fenced code block の info-string を剥がして `egui_commonmark` の `plain_highlighting` に流す。Phase 9 で per-block 判定に精緻化する余地あり |
 
 ## 5. リンク挙動
 
