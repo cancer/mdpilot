@@ -59,6 +59,12 @@ pub struct App {
     /// 7.1) and as the fallback when the current preview has no
     /// usable parent directory.
     project_root: PathBuf,
+    /// Phase 7.2: when `false`, project-tree `Changed` events
+    /// (Phase 6.3) are observed but never trigger a preview switch.
+    /// `Cmd+O` flips this off; the dismissal button in the preview
+    /// pane banner flips it back on. Default is `true` so the
+    /// startup flow auto-follows out of the box.
+    auto_follow_enabled: bool,
     /// `--enable-dev-tools` runtime opt-in. The dev surface (currently
     /// only the `MDPILOT_DEBUG_SCREENSHOT` capture) only activates
     /// when this flag is set and the env var is present. Default
@@ -132,6 +138,7 @@ impl App {
             project_events_rx,
             pending_follow: None,
             project_root: project.root.clone(),
+            auto_follow_enabled: true,
             debug_screenshot: DebugScreenshot::from_env(cli),
         };
         app.sync_watch_target();
@@ -327,6 +334,12 @@ impl App {
                         // Single-file watcher owns the reload path
                         // for the current file; we'd double-arm if
                         // we touched anything here.
+                        continue;
+                    }
+                    if !self.auto_follow_enabled {
+                        // Auto-follow is OFF — observe the event for
+                        // potential UI signals (none yet) but don't
+                        // swap the preview target.
                         continue;
                     }
                     self.pending_follow = Some((path, Instant::now() + FOLLOW_DEBOUNCE));
@@ -656,11 +669,10 @@ impl App {
     /// as a link-driven `SwitchMarkdown`: load, set_document, drop
     /// any pending reload / follow, then re-bind the watcher.
     ///
-    /// Phase 7.2 will add the auto-follow ON/OFF flag and turn it
-    /// OFF on a successful pick (per `docs/preview.md` §9.1.1). For
-    /// now we just clear the one-shot `pending_follow` so a
-    /// project event captured *just before* the dialog dismissal
-    /// doesn't snap the preview away from the file the user picked.
+    /// Per `docs/preview.md` §9.1.1, a successful pick also
+    /// switches auto-follow OFF — the user just told us which file
+    /// they want, so we should not yank it away on the next
+    /// project write. The pane-level banner re-enables follow.
     fn consume_open_shortcut(&mut self, ctx: &egui::Context) -> bool {
         let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
@@ -698,6 +710,10 @@ impl App {
         // target; neither applies after a user-driven switch.
         self.pending_reload = None;
         self.pending_follow = None;
+        // The user just declared their preferred target — disable
+        // auto-follow so a subsequent project write doesn't override
+        // their choice (docs/preview.md §9.1.1).
+        self.auto_follow_enabled = false;
         self.sync_watch_target();
         true
     }
@@ -734,18 +750,29 @@ impl eframe::App for App {
         // play at a time.
         let session_alive = self.session.is_some();
         let mut send_text: Option<String> = None;
+        let mut reenable_follow_clicked = false;
         {
             let mut on_send = |text: String| {
                 send_text = Some(text);
+            };
+            let mut on_reenable_follow = || {
+                reenable_follow_clicked = true;
             };
             crate::ui::layout::show(
                 ui,
                 &mut self.chat,
                 &mut self.preview,
                 self.watcher_error.as_deref(),
+                self.auto_follow_enabled,
+                &mut on_reenable_follow,
                 session_alive,
                 &mut on_send,
             );
+        }
+
+        if reenable_follow_clicked {
+            self.auto_follow_enabled = true;
+            tracing::info!("auto-follow re-enabled via banner button");
         }
 
         if let Some(text) = send_text {

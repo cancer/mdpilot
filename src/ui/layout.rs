@@ -6,11 +6,17 @@ use crate::preview::render::PreviewState;
 const MIN_PANE_WIDTH: f32 = 240.0;
 const PREVIEW_PANEL_ID: &str = "preview_pane";
 
+// Phase 7.7 will collapse this into a context struct when the path
+// bar lands; for now the argument list is straightforward enough
+// that the extra indirection would obscure intent.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     history: &mut ChatHistory,
     preview: &mut PreviewState,
     watcher_error: Option<&str>,
+    auto_follow_enabled: bool,
+    on_reenable_follow: &mut dyn FnMut(),
     session_alive: bool,
     on_send: &mut dyn FnMut(String),
 ) {
@@ -22,7 +28,13 @@ pub fn show(
         .default_size(avail / 2.0)
         .size_range(MIN_PANE_WIDTH..=max_left)
         .show_inside(ui, |ui| {
-            crate::ui::preview_pane::show(ui, preview, watcher_error);
+            crate::ui::preview_pane::show(
+                ui,
+                preview,
+                watcher_error,
+                auto_follow_enabled,
+                on_reenable_follow,
+            );
         });
 
     // Hit-strip on the right edge of the preview pane: a thin column where the
