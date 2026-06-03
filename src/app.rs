@@ -12,7 +12,9 @@ use crate::cli::CliOptions;
 use crate::preview::link::{self, LinkAction};
 use crate::preview::loader::{self, LoadError};
 use crate::preview::render::{PreviewState, PreviewStatus};
-use crate::preview::watcher::{self, FileWatchEvent, FileWatcher, ReloadStep, RELOAD_DEBOUNCE};
+use crate::preview::watcher::{
+    self, FileWatchEvent, FileWatcher, ProjectWatcher, ReloadStep, RELOAD_DEBOUNCE,
+};
 use crate::project::ProjectInit;
 
 pub struct App {
@@ -40,6 +42,12 @@ pub struct App {
     /// §7 ("監視開始失敗時はステータスバーにエラー表示") is at least
     /// visually addressed in MVP.
     watcher_error: Option<String>,
+    /// Phase 6.2 project-tree watcher. Holds the watch alive for the
+    /// process lifetime; the events it generates land on
+    /// `project_events_rx` and Phase 6.2 logs them only. Phase 6.3
+    /// will replace the log with the auto-follow decision.
+    _project_watcher: Option<ProjectWatcher>,
+    project_events_rx: Option<Receiver<FileWatchEvent>>,
     /// `--enable-dev-tools` runtime opt-in. The dev surface (currently
     /// only the `MDPILOT_DEBUG_SCREENSHOT` capture) only activates
     /// when this flag is set and the env var is present. Default
@@ -65,7 +73,8 @@ impl App {
 
         let preview = preview_state_from_env();
 
-        let (watcher, watch_events_rx, startup_watch_error) = match start_watcher(&cc.egui_ctx) {
+        let (watcher, watch_events_rx, mut startup_watch_error) = match start_watcher(&cc.egui_ctx)
+        {
             Ok((w, rx)) => (Some(w), Some(rx), None),
             Err(err) => {
                 tracing::warn!(error = %err, "failed to start file watcher (auto-reload disabled)");
@@ -77,6 +86,27 @@ impl App {
             }
         };
 
+        let (project_watcher, project_events_rx) =
+            match start_project_watcher(&cc.egui_ctx, project.root.clone()) {
+                Ok((w, rx)) => (Some(w), Some(rx)),
+                Err(err) => {
+                    tracing::warn!(
+                        root = %project.root.display(),
+                        error = %err,
+                        "failed to start project watcher (auto-follow disabled)",
+                    );
+                    // Don't overwrite a previous watcher_error from
+                    // the single-file watcher — both can fail
+                    // independently, but the first one to fail
+                    // gets the banner this frame.
+                    if startup_watch_error.is_none() {
+                        startup_watch_error =
+                            Some(format!("プロジェクト監視を開始できません: {err}"));
+                    }
+                    (None, None)
+                }
+            };
+
         let mut app = Self {
             chat,
             preview,
@@ -87,6 +117,8 @@ impl App {
             watch_events_rx,
             pending_reload: None,
             watcher_error: startup_watch_error,
+            _project_watcher: project_watcher,
+            project_events_rx,
             debug_screenshot: DebugScreenshot::from_env(cli),
         };
         app.sync_watch_target();
@@ -251,6 +283,49 @@ impl App {
         // the manual reload added in Phase 5.3.
     }
 
+    /// Phase 6.2: drain project-tree watch events. Currently this
+    /// only logs at info level — Phase 6.3 will replace the log
+    /// with the auto-follow decision (switch preview target when
+    /// claude / external editor writes a different `.md`).
+    fn drain_project_events(&mut self) {
+        let Some(rx) = self.project_events_rx.as_ref() else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok(event) => match event {
+                    FileWatchEvent::Changed { path } => {
+                        tracing::info!(
+                            target: "mdpilot::project_watch",
+                            path = %path.display(),
+                            "project markdown changed (Phase 6.3 will route this to auto-follow)",
+                        );
+                    }
+                    FileWatchEvent::Removed { path } => {
+                        tracing::info!(
+                            target: "mdpilot::project_watch",
+                            path = %path.display(),
+                            "project markdown removed",
+                        );
+                    }
+                    FileWatchEvent::Error(message) => {
+                        tracing::warn!(
+                            target: "mdpilot::project_watch",
+                            message = %message,
+                            "project watcher error",
+                        );
+                        self.watcher_error = Some(format!("プロジェクト監視エラー: {message}"));
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.project_events_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
     /// Write a user prompt to claude's stdin and record it in the local
     /// history. The matching assistant placeholder is only created on
     /// successful write so a `BrokenPipe` doesn't leave an empty assistant
@@ -411,6 +486,20 @@ fn start_watcher(ctx: &egui::Context) -> notify::Result<(FileWatcher, Receiver<F
     Ok((watcher, rx))
 }
 
+/// Build the project-tree watcher (Phase 6.2). Attaches recursively
+/// to the resolved project root; the filter (`.md` only, excluded
+/// dirs skipped) is baked into `ProjectWatcher` so the consumer
+/// channel only sees relevant events.
+fn start_project_watcher(
+    ctx: &egui::Context,
+    root: PathBuf,
+) -> notify::Result<(ProjectWatcher, Receiver<FileWatchEvent>)> {
+    let (tx, rx) = mpsc::channel::<FileWatchEvent>();
+    let wake_ctx = ctx.clone();
+    let watcher = ProjectWatcher::start(root, tx, move || wake_ctx.request_repaint())?;
+    Ok((watcher, rx))
+}
+
 /// Spawn the claude child process with the supplied project root as
 /// its cwd, plus a fresh session id. Phase 6.1 wires the root through
 /// from `project::resolve`; Phase 6.5 will additionally set
@@ -455,6 +544,7 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_chat_events();
         self.drain_watch_events(ctx);
+        self.drain_project_events();
         self.poll_pending_reload(ctx);
         self.consume_reload_shortcut(ctx);
     }

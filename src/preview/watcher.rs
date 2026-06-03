@@ -234,6 +234,172 @@ pub fn classify_event(event: &Event) -> Vec<FileWatchEvent> {
     out
 }
 
+// =====================================================================
+// Phase 6.2: project-tree watcher (recursive, .md-only, with
+// excluded directories per docs/claude-integration.md §6.1).
+// Auto-follow logic that consumes these events lives in Phase 6.3.
+// =====================================================================
+
+/// Directories we skip when fanning out events for the project tree.
+/// `docs/claude-integration.md` §6.1 spells out this list as the
+/// default; override (e.g. via `.mdpilotignore`) is MVP-后. Matching is
+/// case-sensitive because all the names are conventional.
+pub const EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".svelte-kit",
+    ".venv",
+    "__pycache__",
+];
+
+/// Markdown extensions that count as "preview targets" for auto-follow.
+/// Case-insensitive (`README.MD`, `Notes.Markdown` should match).
+const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown"];
+
+/// True when `name` is one of the dirs in [`EXCLUDED_DIRS`]. Pure,
+/// case-sensitive — the names are conventional and lowercasing would
+/// false-positive `.GIT/`-style dirs (rare but technically valid).
+pub fn is_excluded_dir(name: &str) -> bool {
+    EXCLUDED_DIRS.contains(&name)
+}
+
+/// True when `path`'s file extension is one of [`MARKDOWN_EXTENSIONS`]
+/// (case-insensitive). Files without an extension never match.
+pub fn is_markdown_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some(ext) if MARKDOWN_EXTENSIONS.iter().any(|m| ext.eq_ignore_ascii_case(m))
+    )
+}
+
+/// True when `path` lives somewhere inside an [`EXCLUDED_DIRS`]
+/// subtree under `root`. The match is on the path components strictly
+/// between `root` and `path` — `root/.git/HEAD` is excluded,
+/// `root/.git` (the dir itself) is *not* excluded by this predicate
+/// because it has no intermediate component (we filter the directory
+/// itself via the same predicate at higher levels, but this function
+/// answers "is the leaf inside an excluded subtree").
+///
+/// Returns `false` when `path` is not under `root`; callers using the
+/// project watcher should treat out-of-root paths as out-of-scope.
+pub fn is_in_excluded_subtree(path: &Path, root: &Path) -> bool {
+    let relative = match path.strip_prefix(root) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let mut components = relative.components();
+    // The last component is `path`'s file name (or the leaf dir);
+    // we only care about the components above it. `next_back` peels
+    // off the leaf so we don't false-positive on a file *named*
+    // ".git" sitting at the project root.
+    components.next_back();
+    components.any(|c| match c {
+        std::path::Component::Normal(name) => name.to_str().map(is_excluded_dir).unwrap_or(false),
+        _ => false,
+    })
+}
+
+/// Pure project-tree classifier: returns only `Changed` / `Removed`
+/// events for `.md` files outside excluded subtrees, with everything
+/// else dropped. Phase 6.3 will feed these into the auto-follow
+/// logic.
+pub fn classify_project_event(event: &Event, root: &Path) -> Vec<FileWatchEvent> {
+    let mut out = Vec::new();
+    for path in &event.paths {
+        if !is_markdown_path(path) {
+            continue;
+        }
+        if is_in_excluded_subtree(path, root) {
+            continue;
+        }
+        match event.kind {
+            EventKind::Modify(_) | EventKind::Create(_) => {
+                out.push(FileWatchEvent::Changed { path: path.clone() });
+            }
+            EventKind::Remove(_) => {
+                out.push(FileWatchEvent::Removed { path: path.clone() });
+            }
+            EventKind::Access(_) | EventKind::Any | EventKind::Other => {}
+        }
+    }
+    out
+}
+
+/// Recursive watcher rooted at the project directory. Emits filtered
+/// `FileWatchEvent`s (`.md` / `.markdown` only, excluded dirs
+/// skipped) onto the channel handed to [`Self::start`].
+///
+/// Wraps the same `notify::recommended_watcher` as [`FileWatcher`];
+/// kept as a distinct type so its filter contract (project-tree,
+/// markdown-only) is visible at the type level rather than encoded
+/// in a runtime predicate.
+///
+/// Per `docs/claude-integration.md` §2 the project root does not
+/// change during a single mdpilot run (switching projects means a
+/// new window). So `start` attaches immediately and stays attached
+/// for the lifetime of the watcher — no `watch` / `unwatch_all`
+/// surface like [`FileWatcher`] has.
+pub struct ProjectWatcher {
+    _inner: RecommendedWatcher,
+    root: PathBuf,
+}
+
+impl ProjectWatcher {
+    /// Start the project watcher attached to `root`. The notify
+    /// callback closes over `root` so it can classify incoming
+    /// events without further synchronization; we keep a copy on
+    /// `Self` purely for the [`Self::watched_root`] accessor.
+    pub fn start<F>(
+        root: PathBuf,
+        events_tx: mpsc::Sender<FileWatchEvent>,
+        wake_ui: F,
+    ) -> notify::Result<Self>
+    where
+        F: Fn() + Send + 'static,
+    {
+        let root_for_callback = root.clone();
+        let handler = move |res: notify::Result<Event>| {
+            let mut delivered = false;
+            match res {
+                Ok(event) => {
+                    for our_event in classify_project_event(&event, &root_for_callback) {
+                        if events_tx.send(our_event).is_err() {
+                            // Receiver dropped — surface no more
+                            // events. notify will continue calling
+                            // us; subsequent iterations will short-
+                            // circuit the same way.
+                            return;
+                        }
+                        delivered = true;
+                    }
+                }
+                Err(err) => {
+                    let _ = events_tx.send(FileWatchEvent::Error(err.to_string()));
+                    delivered = true;
+                }
+            }
+            if delivered {
+                wake_ui();
+            }
+        };
+        let mut inner = notify::recommended_watcher(handler)?;
+        inner.watch(&root, RecursiveMode::Recursive)?;
+        Ok(Self {
+            _inner: inner,
+            root,
+        })
+    }
+
+    /// Path the watcher is rooted at. Useful for debugging / tests.
+    pub fn watched_root(&self) -> &Path {
+        &self.root
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +658,157 @@ mod tests {
 
         watcher.unwatch_all();
         assert!(watcher.watched_paths().is_empty());
+    }
+
+    // ----- Phase 6.2: project-tree filter helpers ---------------
+
+    #[test]
+    fn is_excluded_dir_matches_listed_names() {
+        for name in EXCLUDED_DIRS {
+            assert!(is_excluded_dir(name), "{name} should be excluded");
+        }
+    }
+
+    #[test]
+    fn is_excluded_dir_misses_unrelated_names() {
+        for name in ["docs", "src", "tests", ".github", "node-modules"] {
+            // `.github` and `node-modules` look close to excluded
+            // entries but are distinct; verify we don't false-positive.
+            assert!(!is_excluded_dir(name), "{name} should not be excluded");
+        }
+    }
+
+    #[test]
+    fn is_markdown_path_is_case_insensitive() {
+        for path in ["a.md", "A.MD", "guide.markdown", "Guide.Markdown"] {
+            assert!(
+                is_markdown_path(Path::new(path)),
+                "{path} should classify as markdown",
+            );
+        }
+    }
+
+    #[test]
+    fn is_markdown_path_rejects_other_extensions() {
+        for path in ["a.txt", "a", "a.markdownx", "a.md.bak"] {
+            assert!(
+                !is_markdown_path(Path::new(path)),
+                "{path} should not classify as markdown",
+            );
+        }
+    }
+
+    #[test]
+    fn excluded_subtree_filters_paths_inside_skipped_dirs() {
+        let root = Path::new("/proj");
+        assert!(is_in_excluded_subtree(Path::new("/proj/.git/config"), root,));
+        assert!(is_in_excluded_subtree(
+            Path::new("/proj/node_modules/foo/index.md"),
+            root,
+        ));
+        assert!(is_in_excluded_subtree(
+            Path::new("/proj/sub/target/notes.md"),
+            root,
+        ));
+    }
+
+    #[test]
+    fn excluded_subtree_does_not_filter_root_level_files() {
+        // A *file* named ".git" at root is improbable but allowed —
+        // the filter only fires on intermediate directory components.
+        let root = Path::new("/proj");
+        assert!(!is_in_excluded_subtree(Path::new("/proj/README.md"), root));
+        assert!(!is_in_excluded_subtree(
+            Path::new("/proj/docs/guide.md"),
+            root,
+        ));
+    }
+
+    #[test]
+    fn excluded_subtree_rejects_paths_outside_root() {
+        let root = Path::new("/proj");
+        // notify may deliver events with paths outside the watch
+        // root (rename From / To). We treat those as not-our-subtree
+        // and the project classifier drops them via the markdown
+        // check anyway, but verify the predicate behavior.
+        assert!(!is_in_excluded_subtree(Path::new("/other/place.md"), root,));
+    }
+
+    #[test]
+    fn project_classifier_emits_markdown_changes_under_root() {
+        let root = Path::new("/proj");
+        let ev = event(
+            EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+            vec!["/proj/docs/guide.md"],
+        );
+        assert_eq!(
+            classify_project_event(&ev, root),
+            vec![FileWatchEvent::Changed {
+                path: PathBuf::from("/proj/docs/guide.md"),
+            }]
+        );
+    }
+
+    #[test]
+    fn project_classifier_skips_non_markdown_files() {
+        let root = Path::new("/proj");
+        let ev = event(
+            EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+            vec!["/proj/src/main.rs"],
+        );
+        assert!(classify_project_event(&ev, root).is_empty());
+    }
+
+    #[test]
+    fn project_classifier_skips_excluded_subtrees() {
+        let root = Path::new("/proj");
+        // A markdown file under .git/ would be a weird artifact, but
+        // we should still ignore it — same with node_modules.
+        let ev = event(
+            EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+            vec![
+                "/proj/.git/COMMIT_EDITMSG.md",
+                "/proj/node_modules/pkg/README.md",
+            ],
+        );
+        assert!(classify_project_event(&ev, root).is_empty());
+    }
+
+    #[test]
+    fn project_classifier_routes_remove_kind_to_removed() {
+        let root = Path::new("/proj");
+        let ev = event(EventKind::Remove(RemoveKind::File), vec!["/proj/old.md"]);
+        assert_eq!(
+            classify_project_event(&ev, root),
+            vec![FileWatchEvent::Removed {
+                path: PathBuf::from("/proj/old.md"),
+            }]
+        );
+    }
+
+    #[test]
+    fn project_classifier_drops_access_events() {
+        let root = Path::new("/proj");
+        let ev = event(
+            EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            vec!["/proj/guide.md"],
+        );
+        assert!(classify_project_event(&ev, root).is_empty());
+    }
+
+    #[test]
+    fn project_watcher_attaches_to_recursive_root() {
+        // Real notify backend smoke test (no event timing — we just
+        // verify start + attach succeed against a real directory
+        // tree). Mirrors the FileWatcher start_and_drop test.
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(canonical.join("docs")).unwrap();
+        std::fs::write(canonical.join("docs/guide.md"), b"# g").unwrap();
+
+        let (tx, _rx) = mpsc::channel::<FileWatchEvent>();
+        let watcher =
+            ProjectWatcher::start(canonical.clone(), tx, || {}).expect("start project watcher");
+        assert_eq!(watcher.watched_root(), canonical.as_path());
     }
 }
