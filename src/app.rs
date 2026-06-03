@@ -718,6 +718,21 @@ impl App {
         true
     }
 
+    /// `docs/ui.md` §6.2: `Cmd+\` (mac) / `Ctrl+\` (Win/Linux)
+    /// resets the pane split to 50/50 by dropping the persisted
+    /// `PanelState` from egui memory. The next frame falls back to
+    /// `default_size`, which `ui::layout::show` sets to half the
+    /// available width. Mirrors the existing double-click-on-edge
+    /// reset path (Phase 1.2).
+    fn consume_pane_reset_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Backslash);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if pressed {
+            crate::ui::layout::reset(ctx);
+        }
+        pressed
+    }
+
     /// Pick the directory the file dialog should open in. Prefer the
     /// currently-shown file's parent, fall back to the project root.
     fn file_picker_start_dir(&self) -> PathBuf {
@@ -741,6 +756,7 @@ impl eframe::App for App {
         self.poll_pending_follow(ctx);
         self.consume_reload_shortcut(ctx);
         self.consume_open_shortcut(ctx);
+        self.consume_pane_reset_shortcut(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
