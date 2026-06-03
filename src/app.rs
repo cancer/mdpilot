@@ -499,29 +499,12 @@ impl eframe::App for App {
 /// saves it as PNG, and exits the process. Default runs (no flag)
 /// short-circuit in `from_env` and never construct the helper, so
 /// the env var has no observable effect on production-style runs.
-///
-/// A hang watchdog (`WATCHDOG_FRAMES_AFTER_REQUEST`) bounds how long
-/// we'll wait for `Event::Screenshot` after sending the viewport
-/// command. Phase 5.2/5.3 testing observed an intermittent hang on
-/// background runs that couldn't be reproduced reliably; we don't
-/// know the root cause, but bounding the wait at least keeps stuck
-/// dev runs from accumulating as orphan processes.
 struct DebugScreenshot {
     path: String,
     frame_count: u32,
     requested: bool,
     closed: bool,
-    /// Frame at which the screenshot was first requested. Used by the
-    /// watchdog: if `Event::Screenshot` hasn't arrived after
-    /// `WATCHDOG_FRAMES_AFTER_REQUEST` frames, abort with an error
-    /// rather than spinning forever.
-    requested_at_frame: u32,
 }
-
-/// `300` frames ≈ 5 seconds at 60 FPS. Generous enough that a busy
-/// system has time to render and respond to the Screenshot viewport
-/// command, but short enough that an actually-stuck loop fails fast.
-const WATCHDOG_FRAMES_AFTER_REQUEST: u32 = 300;
 
 impl DebugScreenshot {
     /// Runtime gate. Returns `None` unless **both** the
@@ -539,7 +522,6 @@ impl DebugScreenshot {
                 frame_count: 0,
                 requested: false,
                 closed: false,
-                requested_at_frame: 0,
             })
     }
 
@@ -549,46 +531,12 @@ impl DebugScreenshot {
         }
         self.frame_count += 1;
 
-        if self.frame_count == 1 || self.frame_count.is_multiple_of(30) {
-            tracing::info!(
-                target: "mdpilot::devtools",
-                frame = self.frame_count,
-                requested = self.requested,
-                "screenshot helper tick",
-            );
-        }
-
         if !self.requested && self.frame_count >= 30 {
-            tracing::info!(
-                target: "mdpilot::devtools",
-                "requesting viewport screenshot",
-            );
             self.requested = true;
-            self.requested_at_frame = self.frame_count;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
 
         if self.requested {
-            // Watchdog: if Event::Screenshot hasn't arrived after a
-            // few hundred frames, give up rather than spin forever.
-            // Phase 5.2/5.3 saw intermittent hangs in background
-            // runs that couldn't be reproduced after the
-            // --enable-dev-tools refactor; root cause unidentified,
-            // but a bounded wait keeps a stuck dev run from leaving
-            // an orphan mdpilot process.
-            if self.frame_count.saturating_sub(self.requested_at_frame)
-                >= WATCHDOG_FRAMES_AFTER_REQUEST
-            {
-                tracing::error!(
-                    target: "mdpilot::devtools",
-                    frames_waited = self.frame_count - self.requested_at_frame,
-                    path = %self.path,
-                    "screenshot watchdog tripped — closing without saving",
-                );
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                self.closed = true;
-                return;
-            }
             let mut grabbed: Option<std::sync::Arc<egui::ColorImage>> = None;
             ctx.input(|i| {
                 for event in &i.raw.events {
