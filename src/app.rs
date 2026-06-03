@@ -817,29 +817,41 @@ impl eframe::App for App {
         // play at a time.
         let session_alive = self.session.is_some();
         let mut send_text: Option<String> = None;
-        let mut reenable_follow_clicked = false;
+        let mut follow_toggled = false;
+        {
+            let mut on_toggle_follow = || {
+                follow_toggled = true;
+            };
+            egui::Panel::top("path_bar").show_inside(ui, |ui| {
+                crate::ui::path_bar::show(
+                    ui,
+                    &self.preview,
+                    self.auto_follow_enabled,
+                    &mut on_toggle_follow,
+                    self.watcher_error.as_deref(),
+                    session_alive,
+                );
+            });
+        }
+        if follow_toggled {
+            self.auto_follow_enabled = !self.auto_follow_enabled;
+            tracing::info!(
+                enabled = self.auto_follow_enabled,
+                "auto-follow toggled via path bar",
+            );
+        }
+
         {
             let mut on_send = |text: String| {
                 send_text = Some(text);
-            };
-            let mut on_reenable_follow = || {
-                reenable_follow_clicked = true;
             };
             crate::ui::layout::show(
                 ui,
                 &mut self.chat,
                 &mut self.preview,
-                self.watcher_error.as_deref(),
-                self.auto_follow_enabled,
-                &mut on_reenable_follow,
                 session_alive,
                 &mut on_send,
             );
-        }
-
-        if reenable_follow_clicked {
-            self.auto_follow_enabled = true;
-            tracing::info!("auto-follow re-enabled via banner button");
         }
 
         if let Some(text) = send_text {
