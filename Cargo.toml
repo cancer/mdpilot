@@ -10,6 +10,14 @@ publish = false
 name = "mdpilot"
 path = "src/main.rs"
 
+[features]
+# Off by default. Enables developer-only debug commands compiled into
+# the binary — currently only the `MDPILOT_DEBUG_SCREENSHOT` viewport
+# capture in `src/app.rs`. Distribution / release builds must NOT
+# enable this; CI / local dev runs pass `--features enable-dev-tools`
+# explicitly when they need the dev surface.
+enable-dev-tools = []
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 directories = "6"
@@ -36,11 +44,11 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4"] }
 
-# `png` is also needed by the debug-build screenshot helper (`cfg(debug_assertions)`),
-# so the feature set serves both production image rendering and the dev tool. Cargo
-# unifies these features across all dependents (including egui_extras' image loader),
-# so JPEG / PNG support flows into the preview pane automatically. GIF / WebP need
-# additional egui_extras loader features and are deferred per docs/preview.md §6.
+# Production image rendering goes through egui_extras' image loader,
+# which picks up our format features via cargo unification. `png` is
+# also used by the `enable-dev-tools` screenshot helper in app.rs.
+# GIF / WebP need additional egui_extras loader features and are
+# deferred per docs/preview.md §6.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [target.'cfg(unix)'.dependencies]

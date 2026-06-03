@@ -38,7 +38,7 @@ pub struct App {
     /// §7 ("監視開始失敗時はステータスバーにエラー表示") is at least
     /// visually addressed in MVP.
     watcher_error: Option<String>,
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "enable-dev-tools")]
     debug_screenshot: Option<DebugScreenshot>,
 }
 
@@ -82,7 +82,7 @@ impl App {
             watch_events_rx,
             pending_reload: None,
             watcher_error: startup_watch_error,
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "enable-dev-tools")]
             debug_screenshot: DebugScreenshot::from_env(),
         };
         app.sync_watch_target();
@@ -481,20 +481,24 @@ impl eframe::App for App {
         // (route .md to set_document, other paths to OS open, etc.).
         self.dispatch_link_clicks(ui.ctx());
 
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "enable-dev-tools")]
         if let Some(cap) = self.debug_screenshot.as_mut() {
             cap.step(ui.ctx());
         }
     }
 }
 
-/// One-shot screenshot helper compiled only in debug builds.
+/// One-shot screenshot helper, available only when the
+/// `enable-dev-tools` Cargo feature is enabled.
 ///
-/// Activated by setting `MDPILOT_DEBUG_SCREENSHOT=/path/to/out.png`. Waits a
-/// handful of frames so layout settles, then requests one viewport screenshot,
-/// saves it as PNG, and exits the process. Release builds skip the entire
-/// module so this leaves no production footprint.
-#[cfg(debug_assertions)]
+/// Activated by setting `MDPILOT_DEBUG_SCREENSHOT=/path/to/out.png` on
+/// a build that opted into the feature
+/// (`cargo run --features enable-dev-tools`). Waits a handful of
+/// frames so layout settles, then requests one viewport screenshot,
+/// saves it as PNG, and exits the process. Default builds skip the
+/// entire module so dev-only surfaces never reach distributed
+/// binaries (see `Cargo.toml [features]` for the rationale).
+#[cfg(feature = "enable-dev-tools")]
 struct DebugScreenshot {
     path: String,
     frame_count: u32,
@@ -502,7 +506,7 @@ struct DebugScreenshot {
     closed: bool,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "enable-dev-tools")]
 impl DebugScreenshot {
     fn from_env() -> Option<Self> {
         std::env::var("MDPILOT_DEBUG_SCREENSHOT")
