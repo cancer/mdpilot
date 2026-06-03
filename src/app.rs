@@ -13,6 +13,7 @@ use crate::preview::link::{self, LinkAction};
 use crate::preview::loader::{self, LoadError};
 use crate::preview::render::{PreviewState, PreviewStatus};
 use crate::preview::watcher::{self, FileWatchEvent, FileWatcher, ReloadStep, RELOAD_DEBOUNCE};
+use crate::project::ProjectInit;
 
 pub struct App {
     chat: ChatHistory,
@@ -47,11 +48,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, cli: CliOptions) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, cli: CliOptions, project: ProjectInit) -> Self {
         crate::ui::fonts::install_japanese(&cc.egui_ctx);
 
         let mut chat = ChatHistory::default();
-        let (session, events_rx) = match spawn_session(&cc.egui_ctx) {
+        let (session, events_rx) = match spawn_session(&cc.egui_ctx, project.root.clone()) {
             Ok((session, rx)) => (Some(session), Some(rx)),
             Err(err) => {
                 tracing::warn!(error = %err, "failed to spawn claude session");
@@ -410,12 +411,16 @@ fn start_watcher(ctx: &egui::Context) -> notify::Result<(FileWatcher, Receiver<F
     Ok((watcher, rx))
 }
 
-/// Spawn the claude child process with cwd = current working directory and a
-/// fresh session id. Returns the session and the receiver half of the event
-/// channel. Phase 6 will replace `current_dir()` with the resolved project
-/// root and start reading session ids from `SessionStore`.
-fn spawn_session(ctx: &egui::Context) -> std::io::Result<(ChatSession, Receiver<ChatEvent>)> {
-    let project_root = std::env::current_dir()?;
+/// Spawn the claude child process with the supplied project root as
+/// its cwd, plus a fresh session id. Phase 6.1 wires the root through
+/// from `project::resolve`; Phase 6.5 will additionally set
+/// `MDPILOT_PROJECT_ROOT` on the child env. Session-id persistence
+/// via `SessionStore` is still pending (Phase 6 sub-task tied to
+/// `--continue`).
+fn spawn_session(
+    ctx: &egui::Context,
+    project_root: PathBuf,
+) -> std::io::Result<(ChatSession, Receiver<ChatEvent>)> {
     let (tx, rx) = mpsc::channel::<ChatEvent>();
     let wake_ctx = ctx.clone();
     let session = ChatSession::start(

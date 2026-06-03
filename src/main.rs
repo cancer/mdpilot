@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod error;
 mod preview;
+mod project;
 mod ui;
 
 fn main() -> eframe::Result {
@@ -11,6 +12,18 @@ fn main() -> eframe::Result {
     install_panic_hook();
     log_app_paths();
     let cli_opts = cli::parse();
+    let project_init = match project::resolve(cli_opts.positional.as_deref()) {
+        Ok(p) => p,
+        Err(err) => {
+            // Hard error before the GUI is up: log + print to stderr
+            // + exit. Using `process::exit(2)` over an
+            // `eframe::Error` because the failure is a CLI input
+            // problem, not an eframe runtime problem.
+            tracing::error!(error = %err, "failed to resolve project root");
+            eprintln!("error: {err}");
+            std::process::exit(2);
+        }
+    };
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -22,7 +35,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "mdpilot",
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, cli_opts)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, cli_opts, project_init)))),
     )
 }
 
