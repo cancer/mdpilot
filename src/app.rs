@@ -77,10 +77,16 @@ pub struct App {
     /// when this flag is set and the env var is present. Default
     /// runs (no flag) ignore the env var entirely.
     debug_screenshot: Option<DebugScreenshot>,
+    /// Phase 7.9 (`docs/perf.md` N-01): start of `App::new`, logged
+    /// once at the first `ui()` call so a release-build run can be
+    /// compared against the 3-second startup budget. `None` after
+    /// the first-frame log fires.
+    startup_started: Option<Instant>,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, cli: CliOptions, project: ProjectInit) -> Self {
+        let startup_started = Instant::now();
         crate::ui::fonts::install_japanese(&cc.egui_ctx);
 
         let mut chat = ChatHistory::default();
@@ -148,6 +154,7 @@ impl App {
             auto_follow_enabled: true,
             last_window_title: String::new(),
             debug_screenshot: DebugScreenshot::from_env(cli),
+            startup_started: Some(startup_started),
         };
         app.sync_watch_target();
         app
@@ -811,6 +818,20 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if let Some(start) = self.startup_started.take() {
+            // Phase 7.9 / docs/perf.md N-01: log time from `App::new`
+            // entry to the first `ui()` invocation. Release-build
+            // runs read this against the 3-second budget; debug
+            // builds are still useful for spotting startup
+            // regressions even though absolute values are slower.
+            let elapsed = start.elapsed();
+            tracing::info!(
+                target: "mdpilot::perf",
+                elapsed_ms = elapsed.as_millis() as u64,
+                "first frame rendered (N-01)",
+            );
+        }
+
         // The view records send/cancel intent into these locals; the actual
         // history mutation and stdin write happen after the UI pass so the
         // borrow on `self.chat` inside layout::show stays the only one in
