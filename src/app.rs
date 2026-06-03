@@ -341,6 +341,18 @@ impl App {
         for event in events {
             match event {
                 FileWatchEvent::Changed { path } => {
+                    if watcher::is_image_path(&path) {
+                        // Phase 9.1B: an image file in the project
+                        // tree changed — drop egui_extras' cached
+                        // copy so the next render re-fetches from
+                        // disk. The URI matches what
+                        // `preview::image::rewrite_image_uris`
+                        // emits when it rewrote the source.
+                        let uri = crate::preview::image::to_file_uri(&path);
+                        ctx.forget_image(&uri);
+                        ctx.request_repaint();
+                        continue;
+                    }
                     let is_current = current_path
                         .as_deref()
                         .map(|c| watcher::paths_match(&path, c))
@@ -361,6 +373,15 @@ impl App {
                     ctx.request_repaint_after(FOLLOW_DEBOUNCE);
                 }
                 FileWatchEvent::Removed { path } => {
+                    if watcher::is_image_path(&path) {
+                        // Drop the cached bytes so the preview
+                        // shows egui's missing-file glyph the next
+                        // time it renders this image.
+                        let uri = crate::preview::image::to_file_uri(&path);
+                        ctx.forget_image(&uri);
+                        ctx.request_repaint();
+                        continue;
+                    }
                     // Don't follow into deleted files. If the deleted
                     // file *was* our pending follow target, drop the
                     // pending switch.

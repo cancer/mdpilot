@@ -7,12 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - mdpilot は Rust + eframe (egui) のネイティブ GUI アプリ。左ペインに Markdown プレビュー、右ペインに **chat UI**（`claude` CLI を子プロセスとして spawn し、`stream-json` で対話）
 - 内蔵ターミナルエミュレータは持たない。`egui_term` / `alacritty_terminal` / `portable-pty` 系は 2026-05-29 のユーザー判断で廃止（`spike/egui_term/` は履歴として残る）
 - 設計フェーズ完了 → 実装フェーズ。`docs/plan.md` 対応一覧表で各タスクの状態（`✓` 完了 / `✗` superseded / `—` 未着手）を管理
-- 完了: Phase 0.1〜0.4, 0.5.2/0.5.3, 仕様改訂, 2.0〜2.7, 1.1〜1.4, 3.1〜3.7（Phase 3 完了）, 4.1〜4.5, 5.1〜5.3（Phase 5 完了）, 6.1〜6.5（Phase 6 完了）, 7.1〜7.4, 7.7〜7.9（Phase 7 完了、7.5/7.6 は 9.15/9.16 へ移送）
+- 完了: Phase 0.1〜0.4, 0.5.2/0.5.3, 仕様改訂, 2.0〜2.7, 1.1〜1.4, 3.1〜3.7（Phase 3 完了）, 4.1〜4.5, 5.1〜5.3（Phase 5 完了）, 6.1〜6.5（Phase 6 完了）, 7.1〜7.4, 7.7〜7.9（Phase 7 完了、7.5/7.6 は 9.15/9.16 へ移送）, 9.1
 - スキップ:
   - Phase 4.6（プレビューのスクロール位置保持）→ Phase 9.14。`egui_commonmark` 0.23 が source-line → rendered Y を非公開で、MVP では block-level 分割再レンダリングか fork のどちらもスコープ外（2026-06-03 ユーザー判断）
   - Phase 7.5（macOS メニューバー）→ Phase 9.15。Cmd+O / Cmd+R / Cmd+\ は動作中で機能上の不足無し、`muda` 統合は discoverability 主顕で screenshot 検証不可（2026-06-03 ユーザー判断）
   - Phase 7.6（Windows ツールバー）→ Phase 9.16。7.5 と対の discoverability タスク、同じ理由で延期（2026-06-03 ユーザー判断）
-- 次の着手対象: **Phase 8（配布）**。8.1 macOS バンドル / 8.2 Windows バイナリ / 8.3 CI（GitHub Actions）/ 8.4 リリース手順。`docs/perf.md` の N-02〜N-04 実値は Phase 8.1 のリリースビルド完成後にユーザー実機で記録
+- 配布 (旧 Phase 8) はユーザー判断で後回し、Phase 9 拡張を先に進める
+- 次の着手対象: **Phase 9.2（F-22 スクロール位置の編集追従）**。編集差分から該当位置にスクロール（`docs/plan.md` タスク 9.2）
 - Phase 5.2/5.3 の残課題: F-08 e2e（編集→100ms 後に自動再描画、削除→「見つかりません」、再作成→Cmd+R で復元）+ Cmd+R / Ctrl+R 動作 + watcher_error バナー表示は実機インタラクティブ検証が必要（screenshot helper は単フレーム capture のみで mid-session の動的検証には使えない）
 - Phase 4.5 の決定: `src/preview/image.rs::rewrite_image_uris` で markdown body を pulldown-cmark 走査 → 相対/絶対のローカル画像 URL を `file://<abs>` に書き換え → `egui_commonmark` の `file://` default scheme と組み合わせて egui_extras::FileLoader が解決する経路。`pulldown-cmark = "0.13"` を直接依存に追加（egui_commonmark の transitive と feature unification）。`egui_commonmark` に `svg` + `embedded_image` features を追加、`image` クレートに `png` + `jpeg` を有効化。HTTP/HTTPS は `fetch` feature 非有効化のため警告アイコンのみ。`pulldown-cmark` のアンエスケープ仕様により `\(`/`&amp;` 等を含む URL は書き換え失敗で警告アイコンのみ（`docs/preview.md` §6 に known gap 記載）。MDPILOT_DEBUG_SCREENSHOT で /tmp/mdpilot-phase45/ サンプルに対し relative PNG / absolute PNG / 不在ファイル / HTTPS の 4 ケース実機確認済み
 - Phase 4.4 の残課題: 実機リンククリック検証（screenshot helper では操作不能）。手動チェック項目は (a) 外部 URL クリックで OS ブラウザ起動 (b) 相対 `.md` クリックでプレビュー切替 (c) 相対画像/PDF クリックで OS 既定アプリ起動 (d) `mailto:` でメーラ起動 (e) `#anchor` クリックは tracing::info ログのみで実害なし

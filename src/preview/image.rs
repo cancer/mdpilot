@@ -150,7 +150,7 @@ fn is_windows_absolute(uri: &str) -> bool {
 /// 3-slash URI. On Windows we add the leading slash explicitly and
 /// normalize backslashes per `file:///C:/...` convention (see
 /// `egui_extras::FileLoader::trim_extra_slash`).
-fn to_file_uri(absolute: &Path) -> String {
+pub(crate) fn to_file_uri(absolute: &Path) -> String {
     let raw = absolute.to_string_lossy();
     if cfg!(windows) {
         let mut s = String::with_capacity(raw.len() + 8);
