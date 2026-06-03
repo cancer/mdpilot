@@ -65,6 +65,13 @@ pub struct App {
     /// pane banner flips it back on. Default is `true` so the
     /// startup flow auto-follows out of the box.
     auto_follow_enabled: bool,
+    /// Phase 7.4: most recently published window title. Stored so
+    /// the per-frame `update_window_title` only sends a
+    /// `ViewportCommand::Title` when the computed title has
+    /// actually changed. Initial value is `""` so the first frame
+    /// always pushes the correct title even when an initial
+    /// preview was loaded at startup.
+    last_window_title: String,
     /// `--enable-dev-tools` runtime opt-in. The dev surface (currently
     /// only the `MDPILOT_DEBUG_SCREENSHOT` capture) only activates
     /// when this flag is set and the env var is present. Default
@@ -139,6 +146,7 @@ impl App {
             pending_follow: None,
             project_root: project.root.clone(),
             auto_follow_enabled: true,
+            last_window_title: String::new(),
             debug_screenshot: DebugScreenshot::from_env(cli),
         };
         app.sync_watch_target();
@@ -733,6 +741,21 @@ impl App {
         pressed
     }
 
+    /// `docs/plan.md` Phase 7.4 — keep the OS window title in sync
+    /// with whatever the preview pane is showing.
+    ///
+    /// We only emit `ViewportCommand::Title` when the computed
+    /// title differs from the cached value, so a stable preview
+    /// state means zero per-frame title traffic.
+    fn update_window_title(&mut self, ctx: &egui::Context) {
+        let new_title = compute_window_title(&self.preview.status);
+        if new_title == self.last_window_title {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(new_title.clone()));
+        self.last_window_title = new_title;
+    }
+
     /// Pick the directory the file dialog should open in. Prefer the
     /// currently-shown file's parent, fall back to the project root.
     fn file_picker_start_dir(&self) -> PathBuf {
@@ -747,6 +770,31 @@ impl App {
     }
 }
 
+/// Pure helper for `App::update_window_title`. The format is
+/// `mdpilot - <basename>` while a file is loaded (or failed to
+/// load), and plain `mdpilot` for the empty placeholder. Pulled
+/// out of `App` so it can be unit-tested without standing up an
+/// eframe context.
+fn compute_window_title(status: &PreviewStatus) -> String {
+    const BASE: &str = "mdpilot";
+    let basename = match status {
+        PreviewStatus::Loaded { document, .. } => document
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string),
+        PreviewStatus::Failed { path_label, .. } => std::path::Path::new(path_label)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string),
+        PreviewStatus::Empty => None,
+    };
+    match basename {
+        Some(name) => format!("{BASE} - {name}"),
+        None => BASE.to_string(),
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_chat_events();
@@ -757,6 +805,9 @@ impl eframe::App for App {
         self.consume_reload_shortcut(ctx);
         self.consume_open_shortcut(ctx);
         self.consume_pane_reset_shortcut(ctx);
+        // Run after all the state mutations above so the title
+        // reflects the *settled* preview status for this frame.
+        self.update_window_title(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -883,5 +934,55 @@ impl DebugScreenshot {
         }
 
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preview::loader::{LoadError, LoadedDocument, SizeClass};
+    use std::path::PathBuf;
+
+    fn loaded(path: &str) -> PreviewStatus {
+        PreviewStatus::Loaded {
+            document: LoadedDocument {
+                path: PathBuf::from(path),
+                text: String::new(),
+                size_bytes: 0,
+                size_class: SizeClass::Small,
+            },
+            rendered_text_override: None,
+        }
+    }
+
+    #[test]
+    fn empty_preview_uses_bare_title() {
+        assert_eq!(compute_window_title(&PreviewStatus::Empty), "mdpilot");
+    }
+
+    #[test]
+    fn loaded_preview_appends_basename() {
+        assert_eq!(
+            compute_window_title(&loaded("/Users/u/proj/README.md")),
+            "mdpilot - README.md",
+        );
+    }
+
+    #[test]
+    fn failed_preview_uses_basename_from_label() {
+        let status = PreviewStatus::Failed {
+            path_label: "/Users/u/proj/missing.md".to_string(),
+            error: LoadError::NotFound,
+        };
+        assert_eq!(compute_window_title(&status), "mdpilot - missing.md");
+    }
+
+    #[test]
+    fn loaded_preview_with_no_filename_falls_back_to_bare() {
+        // A trailing slash leaves `file_name()` as `None`; we'd
+        // rather show plain "mdpilot" than something like
+        // "mdpilot - ". This guards the empty-suffix branch.
+        let status = loaded("/");
+        assert_eq!(compute_window_title(&status), "mdpilot");
     }
 }
