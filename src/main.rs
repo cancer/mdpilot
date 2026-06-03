@@ -1,5 +1,6 @@
 mod app;
 mod chat;
+mod cli;
 mod config;
 mod error;
 mod preview;
@@ -9,6 +10,7 @@ fn main() -> eframe::Result {
     init_tracing();
     install_panic_hook();
     log_app_paths();
+    let cli_opts = cli::parse();
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -20,7 +22,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "mdpilot",
         options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, cli_opts)))),
     )
 }
 

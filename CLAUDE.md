@@ -34,14 +34,17 @@ cargo test chat::stream::tests::parses_text_delta -- --exact
 
 ## debug screenshot helper
 
-`src/app.rs` の `cfg(feature = "enable-dev-tools")` ブロックに、起動 30 フレーム後に viewport をスクリーンショットしてプロセスを正常終了するヘルパが入っている。`enable-dev-tools` Cargo feature を明示的に有効化したときのみコンパイルされ、デフォルトビルドおよび配布ビルドからは消える（`Cargo.toml [features]` 参照）。
+`src/app.rs::DebugScreenshot` に、起動 30 フレーム後に viewport をスクリーンショットしてプロセスを正常終了するヘルパが入っている。コード自体は常にコンパイルされるが、ランタイムで `--enable-dev-tools` CLI フラグと `MDPILOT_DEBUG_SCREENSHOT` env var の **両方** が指定されたときだけ起動する（`src/cli.rs::CliOptions::enable_dev_tools` でゲート）。
 
 ```sh
-# feature を有効化して起動するときだけ MDPILOT_DEBUG_SCREENSHOT が効く
-MDPILOT_DEBUG_SCREENSHOT=/tmp/mdpilot.png cargo run --features enable-dev-tools
+# 通常起動：--enable-dev-tools を渡していないので env var は無視される
+MDPILOT_DEBUG_SCREENSHOT=/tmp/x.png cargo run
+
+# 開発用：cargo run に `--` を挟んでアプリ引数を渡す
+MDPILOT_DEBUG_SCREENSHOT=/tmp/mdpilot.png cargo run -- --enable-dev-tools
 ```
 
-feature 無し（デフォルト）の場合は env var を設定しても screenshot コードは存在しないので何も起こらない。
+CLI パーサは `src/cli.rs::parse_args` で、Phase 6.1 で positional 引数（`mdpilot <dir>` / `<file>`）が加わるまでは `--enable-dev-tools` のみ認識し、それ以外の引数は黙って無視する。
 
 GUI の自動テストは egui の上に薄く、これが現状唯一の描画回帰確認手段。Phase 1.4 で「日本語が tofu 化」、Phase 3.1 で「chat UI レイアウト確認」がこれで検出/確認できた。同じパターンが Phase 3.5 以降でも使える。重要: `Drop` で `ViewportCommand::Close` を送るので、Phase 3.5 以降で claude 子プロセスを App に持たせても孤児化しない（`std::process::exit` ではない）。
 
@@ -124,7 +127,7 @@ claude --print --verbose \
 `docs/plan.md` §5 にも記載。
 
 - ロジック層（pure fn / I/O ラッパー / パーサ / store） → unit test 必須
-- GUI 描画 → `cargo run --features enable-dev-tools` で `MDPILOT_DEBUG_SCREENSHOT` を有効化して目視 + 描画ロジックは `cfg(test)` で `egui::Context::default()` を作って状態 assert
+- GUI 描画 → `cargo run -- --enable-dev-tools` + `MDPILOT_DEBUG_SCREENSHOT` で目視 + 描画ロジックは `cfg(test)` で `egui::Context::default()` を作って状態 assert
 - 外部プロセス（claude）依存テストは書かない（CI で動かない）。ChatSession::start の挙動は実機確認で担保
 - macOS 固有テスト（フォント等）は `#[cfg(target_os = "macos")]` でガード
 

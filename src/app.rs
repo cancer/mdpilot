@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::chat::history::{ChatHistory, SystemMessage};
 use crate::chat::session::{ChatSession, SpawnOptions};
 use crate::chat::stream::ChatEvent;
+use crate::cli::CliOptions;
 use crate::preview::link::{self, LinkAction};
 use crate::preview::loader::{self, LoadError};
 use crate::preview::render::{PreviewState, PreviewStatus};
@@ -38,12 +39,15 @@ pub struct App {
     /// §7 ("監視開始失敗時はステータスバーにエラー表示") is at least
     /// visually addressed in MVP.
     watcher_error: Option<String>,
-    #[cfg(feature = "enable-dev-tools")]
+    /// `--enable-dev-tools` runtime opt-in. The dev surface (currently
+    /// only the `MDPILOT_DEBUG_SCREENSHOT` capture) only activates
+    /// when this flag is set and the env var is present. Default
+    /// runs (no flag) ignore the env var entirely.
     debug_screenshot: Option<DebugScreenshot>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, cli: CliOptions) -> Self {
         crate::ui::fonts::install_japanese(&cc.egui_ctx);
 
         let mut chat = ChatHistory::default();
@@ -82,8 +86,7 @@ impl App {
             watch_events_rx,
             pending_reload: None,
             watcher_error: startup_watch_error,
-            #[cfg(feature = "enable-dev-tools")]
-            debug_screenshot: DebugScreenshot::from_env(),
+            debug_screenshot: DebugScreenshot::from_env(cli),
         };
         app.sync_watch_target();
         app
@@ -481,24 +484,21 @@ impl eframe::App for App {
         // (route .md to set_document, other paths to OS open, etc.).
         self.dispatch_link_clicks(ui.ctx());
 
-        #[cfg(feature = "enable-dev-tools")]
         if let Some(cap) = self.debug_screenshot.as_mut() {
             cap.step(ui.ctx());
         }
     }
 }
 
-/// One-shot screenshot helper, available only when the
-/// `enable-dev-tools` Cargo feature is enabled.
+/// One-shot screenshot helper, gated at runtime behind the
+/// `--enable-dev-tools` CLI flag.
 ///
-/// Activated by setting `MDPILOT_DEBUG_SCREENSHOT=/path/to/out.png` on
-/// a build that opted into the feature
-/// (`cargo run --features enable-dev-tools`). Waits a handful of
+/// Activated by passing `--enable-dev-tools` *and* setting
+/// `MDPILOT_DEBUG_SCREENSHOT=/path/to/out.png`. Waits a handful of
 /// frames so layout settles, then requests one viewport screenshot,
-/// saves it as PNG, and exits the process. Default builds skip the
-/// entire module so dev-only surfaces never reach distributed
-/// binaries (see `Cargo.toml [features]` for the rationale).
-#[cfg(feature = "enable-dev-tools")]
+/// saves it as PNG, and exits the process. Default runs (no flag)
+/// short-circuit in `from_env` and never construct the helper, so
+/// the env var has no observable effect on production-style runs.
 struct DebugScreenshot {
     path: String,
     frame_count: u32,
@@ -506,9 +506,15 @@ struct DebugScreenshot {
     closed: bool,
 }
 
-#[cfg(feature = "enable-dev-tools")]
 impl DebugScreenshot {
-    fn from_env() -> Option<Self> {
+    /// Runtime gate. Returns `None` unless **both** the
+    /// `--enable-dev-tools` CLI flag is set *and* the
+    /// `MDPILOT_DEBUG_SCREENSHOT` env var carries an output path.
+    /// Either condition missing → screenshot is a no-op for this run.
+    fn from_env(cli: CliOptions) -> Option<Self> {
+        if !cli.enable_dev_tools {
+            return None;
+        }
         std::env::var("MDPILOT_DEBUG_SCREENSHOT")
             .ok()
             .map(|path| Self {
