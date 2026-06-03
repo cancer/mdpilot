@@ -19,6 +19,10 @@ egui_commonmark = { version = "0.23", features = [
     "svg",
     "embedded_image",
 ] }
+# Cross-platform filesystem watcher (Phase 5.1, F-08). Default features
+# pull in macos_fsevent; the dispatcher thread is owned by `notify`
+# itself, so we don't spawn an extra std::thread for it.
+notify = "8"
 open = "5"
 # Used directly to scan markdown for image events and rewrite relative
 # URIs (Phase 4.5). egui_commonmark already pulls in 0.13 transitively,
