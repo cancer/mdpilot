@@ -8,7 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 内蔵ターミナルエミュレータは持たない。`egui_term` / `alacritty_terminal` / `portable-pty` 系は 2026-05-29 のユーザー判断で廃止（`spike/egui_term/` は履歴として残る）
 - 設計フェーズ完了 → 実装フェーズ。`docs/plan.md` 対応一覧表で各タスクの状態（`✓` 完了 / `✗` superseded / `—` 未着手）を管理
 - 完了: Phase 0.1〜0.4, 0.5.2/0.5.3, 仕様改訂, 2.0〜2.7, 1.1〜1.4, 3.1〜3.7（Phase 3 完了）, 4.1〜4.5
-- 次の着手対象: **Phase 4.6（プレビューのスクロール位置保持）**。`docs/preview.md` §8 の通り、再読込前の最上端行を記憶してベストエフォートで復元。egui_commonmark_backend が `CommonMarkCache::scroll: HashMap<egui::Id, ScrollableCache>` を内部に持つので、ここを活用するか自前で `ScrollArea::vertical_scroll_offset` を管理する設計選択が要る
+- スキップ: Phase 4.6（プレビューのスクロール位置保持）→ Phase 9.14 に移送。`egui_commonmark` 0.23 が source-line → rendered Y を非公開で、MVP では block-level 分割再レンダリングか fork のどちらもスコープ外。MVP は再読込時に最上端へリセットで一旦倒している（2026-06-03 ユーザー判断）
+- 次の着手対象: **Phase 5.1（notify Watcher セットアップ）**。バックグラウンドスレッドで `RecommendedWatcher`、mpsc でメインに通知（`docs/architecture.md` 4 章、`docs/plan.md` タスク 5.1）
 - Phase 4.5 の決定: `src/preview/image.rs::rewrite_image_uris` で markdown body を pulldown-cmark 走査 → 相対/絶対のローカル画像 URL を `file://<abs>` に書き換え → `egui_commonmark` の `file://` default scheme と組み合わせて egui_extras::FileLoader が解決する経路。`pulldown-cmark = "0.13"` を直接依存に追加（egui_commonmark の transitive と feature unification）。`egui_commonmark` に `svg` + `embedded_image` features を追加、`image` クレートに `png` + `jpeg` を有効化。HTTP/HTTPS は `fetch` feature 非有効化のため警告アイコンのみ。`pulldown-cmark` のアンエスケープ仕様により `\(`/`&amp;` 等を含む URL は書き換え失敗で警告アイコンのみ（`docs/preview.md` §6 に known gap 記載）。MDPILOT_DEBUG_SCREENSHOT で /tmp/mdpilot-phase45/ サンプルに対し relative PNG / absolute PNG / 不在ファイル / HTTPS の 4 ケース実機確認済み
 - Phase 4.4 の残課題: 実機リンククリック検証（screenshot helper では操作不能）。手動チェック項目は (a) 外部 URL クリックで OS ブラウザ起動 (b) 相対 `.md` クリックでプレビュー切替 (c) 相対画像/PDF クリックで OS 既定アプリ起動 (d) `mailto:` でメーラ起動 (e) `#anchor` クリックは tracing::info ログのみで実害なし
 - Phase 3.5 の残課題（いずれもコード反映済みだが手動検証必要）:
