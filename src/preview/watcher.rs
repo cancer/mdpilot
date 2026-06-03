@@ -31,6 +31,13 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 /// period. Held here so App and tests share one number.
 pub const RELOAD_DEBOUNCE: Duration = Duration::from_millis(100);
 
+/// `docs/plan.md` Phase 6.3 / `docs/claude-integration.md` §6.2 —
+/// quiet window between a project-tree write and the auto-follow
+/// switch. Larger than `RELOAD_DEBOUNCE` because we want to give
+/// claude / external editors a moment to *also* hit the current
+/// file before we yank the preview away from it.
+pub const FOLLOW_DEBOUNCE: Duration = Duration::from_millis(200);
+
 /// Coarse-grained file-change notification that App cares about.
 /// One `notify::Event` may name multiple paths and one of several
 /// `EventKind`s; `classify_event` collapses those into a flat list

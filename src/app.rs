@@ -13,7 +13,7 @@ use crate::preview::link::{self, LinkAction};
 use crate::preview::loader::{self, LoadError};
 use crate::preview::render::{PreviewState, PreviewStatus};
 use crate::preview::watcher::{
-    self, FileWatchEvent, FileWatcher, ProjectWatcher, ReloadStep, RELOAD_DEBOUNCE,
+    self, FileWatchEvent, FileWatcher, ProjectWatcher, ReloadStep, FOLLOW_DEBOUNCE, RELOAD_DEBOUNCE,
 };
 use crate::project::ProjectInit;
 
@@ -42,12 +42,18 @@ pub struct App {
     /// §7 ("監視開始失敗時はステータスバーにエラー表示") is at least
     /// visually addressed in MVP.
     watcher_error: Option<String>,
-    /// Phase 6.2 project-tree watcher. Holds the watch alive for the
-    /// process lifetime; the events it generates land on
-    /// `project_events_rx` and Phase 6.2 logs them only. Phase 6.3
-    /// will replace the log with the auto-follow decision.
+    /// Project-tree watcher (Phase 6.2). Holds the watch alive for
+    /// the process lifetime; events flow through `project_events_rx`
+    /// to `drain_project_events`, which arms `pending_follow` on
+    /// changes to *other* `.md` files (auto-follow, F-09 案 A).
     _project_watcher: Option<ProjectWatcher>,
     project_events_rx: Option<Receiver<FileWatchEvent>>,
+    /// Phase 6.3: deadline at which the auto-follow switch should
+    /// fire. The path is what we'll load when the deadline elapses;
+    /// a fresh project event before the deadline updates *both* the
+    /// path and the deadline so we always follow the most-recent
+    /// write.
+    pending_follow: Option<(PathBuf, Instant)>,
     /// `--enable-dev-tools` runtime opt-in. The dev surface (currently
     /// only the `MDPILOT_DEBUG_SCREENSHOT` capture) only activates
     /// when this flag is set and the env var is present. Default
@@ -119,6 +125,7 @@ impl App {
             watcher_error: startup_watch_error,
             _project_watcher: project_watcher,
             project_events_rx,
+            pending_follow: None,
             debug_screenshot: DebugScreenshot::from_env(cli),
         };
         app.sync_watch_target();
@@ -283,44 +290,124 @@ impl App {
         // the manual reload added in Phase 5.3.
     }
 
-    /// Phase 6.2: drain project-tree watch events. Currently this
-    /// only logs at info level — Phase 6.3 will replace the log
-    /// with the auto-follow decision (switch preview target when
-    /// claude / external editor writes a different `.md`).
-    fn drain_project_events(&mut self) {
-        let Some(rx) = self.project_events_rx.as_ref() else {
+    /// Phase 6.3: drain project-tree watch events and arm the
+    /// auto-follow timer. Events for the *currently* displayed file
+    /// are dropped (the single-file watcher in `drain_watch_events`
+    /// will handle that reload via `RELOAD_DEBOUNCE`); events for
+    /// *other* `.md` files schedule a follow switch after
+    /// `FOLLOW_DEBOUNCE`.
+    fn drain_project_events(&mut self, ctx: &egui::Context) {
+        let events = self.collect_project_events();
+        if events.is_empty() {
             return;
+        }
+        let current_path = match &self.preview.status {
+            PreviewStatus::Loaded { document, .. } => Some(document.path.clone()),
+            // `Failed::path_label` is the path the user *intended*
+            // to view; for follow purposes we still treat it as
+            // "current" so a write to the missing file doesn't trip
+            // a follow switch to itself.
+            PreviewStatus::Failed { path_label, .. } => Some(PathBuf::from(path_label)),
+            PreviewStatus::Empty => None,
+        };
+        for event in events {
+            match event {
+                FileWatchEvent::Changed { path } => {
+                    let is_current = current_path
+                        .as_deref()
+                        .map(|c| watcher::paths_match(&path, c))
+                        .unwrap_or(false);
+                    if is_current {
+                        // Single-file watcher owns the reload path
+                        // for the current file; we'd double-arm if
+                        // we touched anything here.
+                        continue;
+                    }
+                    self.pending_follow = Some((path, Instant::now() + FOLLOW_DEBOUNCE));
+                    ctx.request_repaint_after(FOLLOW_DEBOUNCE);
+                }
+                FileWatchEvent::Removed { path } => {
+                    // Don't follow into deleted files. If the deleted
+                    // file *was* our pending follow target, drop the
+                    // pending switch.
+                    if let Some((pending_path, _)) = self.pending_follow.as_ref() {
+                        if watcher::paths_match(&path, pending_path) {
+                            self.pending_follow = None;
+                        }
+                    }
+                }
+                FileWatchEvent::Error(message) => {
+                    tracing::warn!(
+                        target: "mdpilot::project_watch",
+                        message = %message,
+                        "project watcher error",
+                    );
+                    self.watcher_error = Some(format!("プロジェクト監視エラー: {message}"));
+                }
+            }
+        }
+    }
+
+    /// Two-pass drain mirror of [`Self::collect_watch_events`]: copy
+    /// every pending project event out of the channel before we
+    /// touch the rest of `self`. Keeps the borrow checker happy in
+    /// `drain_project_events`.
+    fn collect_project_events(&mut self) -> Vec<FileWatchEvent> {
+        let mut out = Vec::new();
+        let Some(rx) = self.project_events_rx.as_ref() else {
+            return out;
         };
         loop {
             match rx.try_recv() {
-                Ok(event) => match event {
-                    FileWatchEvent::Changed { path } => {
-                        tracing::info!(
-                            target: "mdpilot::project_watch",
-                            path = %path.display(),
-                            "project markdown changed (Phase 6.3 will route this to auto-follow)",
-                        );
-                    }
-                    FileWatchEvent::Removed { path } => {
-                        tracing::info!(
-                            target: "mdpilot::project_watch",
-                            path = %path.display(),
-                            "project markdown removed",
-                        );
-                    }
-                    FileWatchEvent::Error(message) => {
-                        tracing::warn!(
-                            target: "mdpilot::project_watch",
-                            message = %message,
-                            "project watcher error",
-                        );
-                        self.watcher_error = Some(format!("プロジェクト監視エラー: {message}"));
-                    }
-                },
+                Ok(event) => out.push(event),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.project_events_rx = None;
                     break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Phase 6.3: if the follow debounce has elapsed, switch the
+    /// preview target to the queued path. Reuses
+    /// `watcher::reload_decision` since the timing semantics are the
+    /// same (deadline → Wait/Fire/Idle). Failure to load falls
+    /// through to `set_error` so the user sees what happened
+    /// (typically a race where the file was deleted between event
+    /// and follow).
+    fn poll_pending_follow(&mut self, ctx: &egui::Context) {
+        let deadline = self.pending_follow.as_ref().map(|(_, d)| *d);
+        match watcher::reload_decision(deadline, Instant::now()) {
+            ReloadStep::Idle => {}
+            ReloadStep::Wait { remaining } => ctx.request_repaint_after(remaining),
+            ReloadStep::Fire => {
+                let Some((path, _)) = self.pending_follow.take() else {
+                    return;
+                };
+                tracing::info!(
+                    path = %path.display(),
+                    "auto-follow switching preview target",
+                );
+                let label = path.to_string_lossy().into_owned();
+                match loader::load_markdown(&path) {
+                    Ok(document) => {
+                        self.preview.set_document(document);
+                        self.watcher_error = None;
+                        // Cancel any in-flight reload for the *old*
+                        // file — it doesn't apply to the new target.
+                        self.pending_reload = None;
+                        self.sync_watch_target();
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %label,
+                            ?error,
+                            "auto-follow target failed to load",
+                        );
+                        self.preview.set_error(label, error);
+                    }
                 }
             }
         }
@@ -415,8 +502,11 @@ impl App {
                 }
                 // Re-bind the watcher to the new target; the debounce
                 // timer (if any) targeted the old path and is no
-                // longer meaningful.
+                // longer meaningful. Likewise drop any pending
+                // auto-follow — user-driven navigation wins over
+                // claude-driven follow.
                 self.pending_reload = None;
+                self.pending_follow = None;
                 self.sync_watch_target();
             }
             LinkAction::OpenWithOsApp { path } => {
@@ -544,8 +634,9 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_chat_events();
         self.drain_watch_events(ctx);
-        self.drain_project_events();
+        self.drain_project_events(ctx);
         self.poll_pending_reload(ctx);
+        self.poll_pending_follow(ctx);
         self.consume_reload_shortcut(ctx);
     }
 
