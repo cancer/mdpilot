@@ -2,6 +2,7 @@ mod app;
 mod chat;
 mod config;
 mod error;
+mod preview;
 mod ui;
 
 fn main() -> eframe::Result {
