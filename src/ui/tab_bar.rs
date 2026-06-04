@@ -29,6 +29,9 @@ pub enum TabBarAction {
     Select(usize),
     Close(usize),
     NewTab,
+    /// User clicked the "履歴" button — App should open the
+    /// session picker modal (Phase 9.X.2).
+    OpenHistory,
 }
 
 const ACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(60, 60, 60);
@@ -48,10 +51,18 @@ pub fn show(ui: &mut egui::Ui, items: &[TabBarItem]) -> TabBarAction {
                 // to do this iteration.
             }
         }
-        // Right-side `+` for a fresh tab. Small-button keeps the
-        // bar compact.
+        // Right-side cluster: `+` for a fresh tab, then a
+        // "履歴" button that opens the resume-picker modal
+        // (Phase 9.X.2).
         if ui.small_button("+").on_hover_text("新規タブ").clicked() {
             action = TabBarAction::NewTab;
+        }
+        if ui
+            .small_button("履歴")
+            .on_hover_text("過去のチャットを再開")
+            .clicked()
+        {
+            action = TabBarAction::OpenHistory;
         }
     });
     action

@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use eframe::egui;
 
+use crate::chat::history_picker::{self, SessionMeta};
 use crate::chat::quote;
 use crate::chat::session_store::SessionStore;
 use crate::cli::CliOptions;
@@ -14,6 +15,7 @@ use crate::preview::render::{PreviewState, PreviewStatus};
 use crate::preview::watcher::{self, FileWatchEvent, ProjectWatcher};
 use crate::project::{self, ProjectInit};
 use crate::tab::{ResumeSession, Tab, TabIdGen};
+use crate::ui::session_picker::{self, SessionPickerAction};
 use crate::ui::tab_bar::{self, TabBarAction, TabBarItem};
 use uuid::Uuid;
 
@@ -78,6 +80,20 @@ pub struct App {
     /// when mdpilot is closed before any messages exchange), and
     /// the next launch would try to resume a ghost session.
     session_persisted_this_run: bool,
+
+    /// Phase 9.X.2: state for the resume-picker modal. `None`
+    /// when the modal is closed; `Some(_)` while it's open with
+    /// a pre-loaded session list. The list is captured on open
+    /// (cheap directory scan) and not refreshed per-frame.
+    session_picker: Option<SessionPickerData>,
+}
+
+/// Phase 9.X.2: pre-loaded contents of the resume-picker modal.
+/// Built when the user clicks 履歴; cleared on close or selection.
+#[derive(Debug)]
+struct SessionPickerData {
+    sessions: Vec<SessionMeta>,
+    error: Option<String>,
 }
 
 /// Per-frame state for routing a preview selection into the chat
@@ -172,7 +188,60 @@ impl App {
             chat_quote_state: ChatQuoteState::Idle,
             session_store_path,
             session_persisted_this_run: false,
+            session_picker: None,
         }
+    }
+
+    /// Phase 9.X.2: scan claude's per-project session dir and
+    /// open the picker modal. The scan is synchronous because
+    /// `read_dir` + `read_to_string` on a typical session dir
+    /// (dozens of files at most) finishes in microseconds; we
+    /// don't need a background thread.
+    fn open_session_picker(&mut self) {
+        let data = match directories::BaseDirs::new() {
+            Some(base) => {
+                let dir = history_picker::project_session_dir(base.home_dir(), &self.project_root);
+                match history_picker::list_sessions(&dir) {
+                    Ok(sessions) => SessionPickerData {
+                        sessions,
+                        error: None,
+                    },
+                    Err(err) => SessionPickerData {
+                        sessions: Vec::new(),
+                        error: Some(err.to_string()),
+                    },
+                }
+            }
+            None => SessionPickerData {
+                sessions: Vec::new(),
+                error: Some("ホームディレクトリが取得できません".to_string()),
+            },
+        };
+        self.session_picker = Some(data);
+    }
+
+    /// Phase 9.X.2: spawn a fresh tab that resumes `session_id`
+    /// via `claude --resume <id>`. Mirrors `new_tab()` but with
+    /// `ResumeSession` set instead of `None`. Used both by the
+    /// picker modal (`SessionPickerAction::Resume`) and any
+    /// future shortcut that resumes by id.
+    fn open_tab_resuming(&mut self, session_id: Uuid) {
+        let id = self.tab_id_gen.next();
+        // Truncate id for the label so the tab bar stays compact.
+        // `Tab::session_id` keeps the full id for the spawn.
+        let short: String = session_id.to_string().chars().take(8).collect();
+        let label = format!("再開 {short}");
+        let tab = Tab::new(
+            &self.ctx,
+            &self.project_root,
+            PreviewState::default(),
+            id,
+            label,
+            Some(ResumeSession { session_id }),
+        );
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        self.last_window_title.clear();
     }
 
     /// Phase 9.X.1: write the currently-active tab's session id to
@@ -769,6 +838,7 @@ impl eframe::App for App {
             TabBarAction::Select(idx) => self.select_tab(idx),
             TabBarAction::Close(idx) => self.close_tab(idx),
             TabBarAction::NewTab => self.new_tab(),
+            TabBarAction::OpenHistory => self.open_session_picker(),
         }
 
         let active_idx = self.active_tab;
@@ -819,6 +889,7 @@ impl eframe::App for App {
 
         self.dispatch_link_clicks(ui.ctx());
         self.show_chat_quote_bubble(ui.ctx());
+        self.show_session_picker(ui.ctx());
 
         if let Some(cap) = self.debug_screenshot.as_mut() {
             cap.step(ui.ctx());
@@ -827,6 +898,27 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Phase 9.X.2: render the resume-picker modal when
+    /// `session_picker` is `Some`. Closes on the modal's X
+    /// button or after the user picks a session (which also
+    /// opens a new tab via `open_tab_resuming`).
+    fn show_session_picker(&mut self, ctx: &egui::Context) {
+        let Some(data) = self.session_picker.as_ref() else {
+            return;
+        };
+        let action = session_picker::show(ctx, &data.sessions, data.error.as_deref());
+        match action {
+            SessionPickerAction::None => {}
+            SessionPickerAction::Close => {
+                self.session_picker = None;
+            }
+            SessionPickerAction::Resume(session_id) => {
+                self.session_picker = None;
+                self.open_tab_resuming(session_id);
+            }
+        }
+    }
+
     /// Phase 9.X: render the floating "→チャット" button when
     /// egui's `LabelSelectionState` reports a live selection and
     /// we're not already mid-flight on a previous request. The
