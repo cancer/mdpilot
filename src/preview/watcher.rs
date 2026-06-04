@@ -267,14 +267,6 @@ pub const EXCLUDED_DIRS: &[&str] = &[
 /// Case-insensitive (`README.MD`, `Notes.Markdown` should match).
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown"];
 
-/// Image extensions that the project watcher tracks for the
-/// auto-reload pipeline (Phase 9.1B). The set matches the formats
-/// `docs/preview.md` §6 lists; we forward the file watch events for
-/// each, and the App turns them into `ctx.forget_image` calls so
-/// `egui_extras::FileLoader` re-fetches on the next render. HTTPS
-/// images are not in scope — they have no local file to watch.
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
-
 /// True when `name` is one of the dirs in [`EXCLUDED_DIRS`]. Pure,
 /// case-sensitive — the names are conventional and lowercasing would
 /// false-positive `.GIT/`-style dirs (rare but technically valid).
@@ -288,16 +280,6 @@ pub fn is_markdown_path(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
         Some(ext) if MARKDOWN_EXTENSIONS.iter().any(|m| ext.eq_ignore_ascii_case(m))
-    )
-}
-
-/// True when `path`'s file extension is one of [`IMAGE_EXTENSIONS`]
-/// (case-insensitive). Used by `classify_project_event` to forward
-/// image-file changes alongside `.md` changes.
-pub fn is_image_path(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some(ext) if IMAGE_EXTENSIONS.iter().any(|m| ext.eq_ignore_ascii_case(m))
     )
 }
 
@@ -329,14 +311,12 @@ pub fn is_in_excluded_subtree(path: &Path, root: &Path) -> bool {
 }
 
 /// Pure project-tree classifier: returns `Changed` / `Removed`
-/// events for `.md` (Phase 6.3 auto-follow) **and** image files
-/// (Phase 9.1B auto-reload) outside excluded subtrees. Everything
-/// else is dropped. The App distinguishes the two cases by
-/// checking the extension at drain time.
+/// events for `.md` files outside excluded subtrees. Everything
+/// else is dropped.
 pub fn classify_project_event(event: &Event, root: &Path) -> Vec<FileWatchEvent> {
     let mut out = Vec::new();
     for path in &event.paths {
-        if !is_markdown_path(path) && !is_image_path(path) {
+        if !is_markdown_path(path) {
             continue;
         }
         if is_in_excluded_subtree(path, root) {
@@ -813,56 +793,15 @@ mod tests {
     }
 
     #[test]
-    fn is_image_path_recognizes_all_supported_extensions() {
-        for path in [
-            "a.png", "A.PNG", "b.jpg", "b.jpeg", "B.JPEG", "c.gif", "d.webp", "e.svg", "X.SVG",
-        ] {
-            assert!(is_image_path(Path::new(path)), "{path} should be image");
-        }
-    }
-
-    #[test]
-    fn is_image_path_rejects_non_image_extensions() {
-        for path in ["a.bmp", "a.tiff", "a.md", "a", "a.png.bak"] {
-            assert!(
-                !is_image_path(Path::new(path)),
-                "{path} should not be image",
-            );
-        }
-    }
-
-    #[test]
-    fn project_classifier_emits_image_changes() {
+    fn project_classifier_drops_image_changes() {
         let root = Path::new("/proj");
         let ev = event(
             EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
             vec!["/proj/assets/hero.png"],
         );
-        assert_eq!(
-            classify_project_event(&ev, root),
-            vec![FileWatchEvent::Changed {
-                path: PathBuf::from("/proj/assets/hero.png"),
-            }]
-        );
-    }
-
-    #[test]
-    fn project_classifier_emits_mixed_md_and_image_changes() {
-        let root = Path::new("/proj");
-        let ev = event(
-            EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
-            vec!["/proj/docs/guide.md", "/proj/assets/diagram.svg"],
-        );
-        assert_eq!(
-            classify_project_event(&ev, root),
-            vec![
-                FileWatchEvent::Changed {
-                    path: PathBuf::from("/proj/docs/guide.md"),
-                },
-                FileWatchEvent::Changed {
-                    path: PathBuf::from("/proj/assets/diagram.svg"),
-                },
-            ]
+        assert!(
+            classify_project_event(&ev, root).is_empty(),
+            "image changes are out of scope after markdown preview removal",
         );
     }
 

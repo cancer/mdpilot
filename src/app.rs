@@ -9,7 +9,6 @@ use crate::chat::quote;
 use crate::chat::session_store::SessionStore;
 use crate::cli::CliOptions;
 use crate::config::paths::AppPaths;
-use crate::preview::link::{self, LinkAction};
 use crate::preview::loader::{self};
 use crate::preview::render::{PreviewState, PreviewStatus};
 use crate::preview::watcher::{self, FileWatchEvent, ProjectWatcher};
@@ -512,12 +511,6 @@ impl App {
         for event in events {
             match event {
                 FileWatchEvent::Changed { path } => {
-                    if watcher::is_image_path(&path) {
-                        let uri = crate::preview::image::to_file_uri(&path);
-                        ctx.forget_image(&uri);
-                        ctx.request_repaint();
-                        continue;
-                    }
                     let is_current = current_path
                         .as_deref()
                         .map(|c| watcher::paths_match(&path, c))
@@ -535,12 +528,6 @@ impl App {
                     ctx.request_repaint_after(crate::preview::watcher::FOLLOW_DEBOUNCE);
                 }
                 FileWatchEvent::Removed { path } => {
-                    if watcher::is_image_path(&path) {
-                        let uri = crate::preview::image::to_file_uri(&path);
-                        ctx.forget_image(&uri);
-                        ctx.request_repaint();
-                        continue;
-                    }
                     if let Some((pending_path, _)) = tab.pending_follow.as_ref() {
                         if watcher::paths_match(&path, pending_path) {
                             tab.pending_follow = None;
@@ -655,73 +642,6 @@ impl App {
             }
         }
         out
-    }
-
-    /// Take ownership of every `OutputCommand::OpenUrl` egui_commonmark
-    /// posted during the just-completed UI pass and dispatch it through
-    /// our link policy (`docs/preview.md` §5).
-    fn dispatch_link_clicks(&mut self, ctx: &egui::Context) {
-        let clicked_urls: Vec<String> = ctx.output_mut(|o| {
-            let mut clicked = Vec::new();
-            o.commands.retain(|cmd| match cmd {
-                egui::OutputCommand::OpenUrl(open_url) => {
-                    clicked.push(open_url.url.clone());
-                    false
-                }
-                _ => true,
-            });
-            clicked
-        });
-
-        for url in clicked_urls {
-            self.handle_link_click(ctx, &url);
-        }
-    }
-
-    fn handle_link_click(&mut self, ctx: &egui::Context, href: &str) {
-        let current_dir = match &self.active().preview.status {
-            PreviewStatus::Loaded { document, .. } => {
-                document.path.parent().map(|p| p.to_path_buf())
-            }
-            _ => None,
-        };
-        let action = link::classify(href, current_dir.as_deref());
-        match action {
-            LinkAction::Empty => {}
-            LinkAction::Anchor { fragment } => {
-                tracing::info!(fragment = %fragment, "anchor link click (MVP no-op)");
-            }
-            LinkAction::External { url } => {
-                ctx.open_url(egui::OpenUrl::new_tab(url));
-            }
-            LinkAction::SwitchMarkdown { path } => {
-                let label = path.to_string_lossy().into_owned();
-                let tab = self.active_mut();
-                match loader::load_markdown(&path) {
-                    Ok(document) => tab.preview.set_document(document),
-                    Err(error) => {
-                        tracing::warn!(
-                            path = %label,
-                            ?error,
-                            "failed to switch preview target",
-                        );
-                        tab.preview.set_error(label, error);
-                    }
-                }
-                tab.pending_reload = None;
-                tab.pending_follow = None;
-                tab.sync_watch_target();
-            }
-            LinkAction::OpenWithOsApp { path } => {
-                if let Err(err) = open::that(&path) {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "OS open failed",
-                    );
-                }
-            }
-        }
     }
 }
 
@@ -887,7 +807,6 @@ impl eframe::App for App {
             tab.handle_send(text);
         }
 
-        self.dispatch_link_clicks(ui.ctx());
         self.show_chat_quote_bubble(ui.ctx());
         self.show_session_picker(ui.ctx());
 
@@ -1041,7 +960,6 @@ mod tests {
                 size_bytes: 0,
                 size_class: SizeClass::Small,
             },
-            rendered_text_override: None,
         }
     }
 
