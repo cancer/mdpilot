@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use eframe::egui;
 
+use crate::chat::quote;
 use crate::cli::CliOptions;
 use crate::preview::link::{self, LinkAction};
 use crate::preview::loader::{self};
@@ -55,6 +56,25 @@ pub struct App {
     /// `ui()` call so a release-build run can be compared against
     /// the 3-second startup budget.
     startup_started: Option<Instant>,
+
+    /// Phase 9.X "send selection to chat" state machine. Three
+    /// frames are involved because egui's selected text is only
+    /// reachable via the `Event::Copy` → `OutputCommand::CopyText`
+    /// round-trip. See the variants for the per-frame transitions.
+    chat_quote_state: ChatQuoteState,
+}
+
+/// Per-frame state for routing a preview selection into the chat
+/// input. Idle is the resting state; the bubble button transitions
+/// to `PendingInject`. The next frame's `logic()` injects an
+/// `Event::Copy` and moves to `AwaitingDrain`; the frame after
+/// that drains the resulting `OutputCommand::CopyText` and
+/// appends the formatted quote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatQuoteState {
+    Idle,
+    PendingInject,
+    AwaitingDrain,
 }
 
 impl App {
@@ -108,6 +128,7 @@ impl App {
             last_window_title: String::new(),
             debug_screenshot: DebugScreenshot::from_env(cli),
             startup_started: Some(startup_started),
+            chat_quote_state: ChatQuoteState::Idle,
         }
     }
 
@@ -374,6 +395,86 @@ impl App {
         }
     }
 
+    /// Phase 9.X: state-machine advance for the
+    /// `chat_quote_state`. Called once at the top of `logic()`,
+    /// before any other input draining. Three states:
+    ///
+    /// - `Idle` → no action.
+    /// - `PendingInject` → push an `Event::Copy` into this frame's
+    ///   input events (label processing later in this frame will
+    ///   see it and accumulate `text_to_copy`), then advance to
+    ///   `AwaitingDrain`.
+    /// - `AwaitingDrain` → drain `OutputCommand::CopyText` from
+    ///   the *previous* frame's output (which is still sitting in
+    ///   ctx.output_mut at this point because `logic()` runs
+    ///   before eframe consumes the output for clipboard
+    ///   delivery). Append the formatted quote to the active tab's
+    ///   chat input and return to `Idle`.
+    fn advance_chat_quote_state(&mut self, ctx: &egui::Context) {
+        match self.chat_quote_state {
+            ChatQuoteState::Idle => {}
+            ChatQuoteState::PendingInject => {
+                ctx.input_mut(|i| i.events.push(egui::Event::Copy));
+                self.chat_quote_state = ChatQuoteState::AwaitingDrain;
+                // Repaint so the on_end_pass that emits CopyText
+                // runs even if there is no other input activity.
+                ctx.request_repaint();
+            }
+            ChatQuoteState::AwaitingDrain => {
+                let copied = ctx.output_mut(|o| {
+                    let mut grabbed: Option<String> = None;
+                    o.commands.retain(|cmd| match cmd {
+                        egui::OutputCommand::CopyText(text) if grabbed.is_none() => {
+                            grabbed = Some(text.clone());
+                            // Keep the CopyText in the queue so the
+                            // OS clipboard still gets it — the user
+                            // expects a "→チャット" click to *also*
+                            // leave the selection on the clipboard,
+                            // matching the Cmd+C side-effect.
+                            true
+                        }
+                        _ => true,
+                    });
+                    grabbed
+                });
+                if let Some(text) = copied {
+                    self.append_quote_to_active_tab(&text);
+                }
+                self.chat_quote_state = ChatQuoteState::Idle;
+            }
+        }
+    }
+
+    fn append_quote_to_active_tab(&mut self, selection: &str) {
+        if selection.is_empty() {
+            return;
+        }
+        let (source, filename) = match &self.active().preview.status {
+            PreviewStatus::Loaded { document, .. } => (
+                Some(document.text.as_str()),
+                document.path.file_name().and_then(|n| n.to_str()),
+            ),
+            PreviewStatus::Failed { path_label, .. } => (
+                None,
+                std::path::Path::new(path_label)
+                    .file_name()
+                    .and_then(|n| n.to_str()),
+            ),
+            PreviewStatus::Empty => (None, None),
+        };
+        let block = quote::format_quote_block(selection, source, filename);
+        if block.is_empty() {
+            return;
+        }
+        let input = &mut self.active_mut().chat.input;
+        // Drop a leading blank line only when the input already has
+        // content; otherwise the quote sits flush at the top.
+        if !input.is_empty() && !input.ends_with('\n') {
+            input.push('\n');
+        }
+        input.push_str(&block);
+    }
+
     fn collect_project_events(&mut self) -> Vec<FileWatchEvent> {
         let mut out = Vec::new();
         let Some(rx) = self.project_events_rx.as_ref() else {
@@ -514,6 +615,10 @@ fn compute_window_title(status: &PreviewStatus) -> String {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Advance the chat-quote state machine *first* so any
+        // injected Event::Copy lands in this frame's input events
+        // before label processing runs in ui().
+        self.advance_chat_quote_state(ctx);
         // Per-tab event drain. Background tabs still drain their
         // chat / file-watcher events so history accumulates while
         // they're inactive — only the project-watcher dispatch is
@@ -617,10 +722,54 @@ impl eframe::App for App {
         }
 
         self.dispatch_link_clicks(ui.ctx());
+        self.show_chat_quote_bubble(ui.ctx());
 
         if let Some(cap) = self.debug_screenshot.as_mut() {
             cap.step(ui.ctx());
         }
+    }
+}
+
+impl App {
+    /// Phase 9.X: render the floating "→チャット" button when
+    /// egui's `LabelSelectionState` reports a live selection and
+    /// we're not already mid-flight on a previous request. The
+    /// `Area` anchors to the latest pointer position; egui's
+    /// `LabelSelectionState` keeps the selection bbox private, so
+    /// this is the closest visible anchor we can reach without
+    /// forking the plugin.
+    fn show_chat_quote_bubble(&mut self, ctx: &egui::Context) {
+        if self.chat_quote_state != ChatQuoteState::Idle {
+            return;
+        }
+        let has_selection = ctx
+            .plugin::<egui::text_selection::LabelSelectionState>()
+            .lock()
+            .has_selection();
+        if !has_selection {
+            return;
+        }
+        let Some(pointer_pos) = ctx.pointer_latest_pos() else {
+            return;
+        };
+        // Offset slightly to the lower-right so the bubble doesn't
+        // sit directly under the pointer (which would block further
+        // click interactions on the selection).
+        let anchor = pointer_pos + egui::vec2(8.0, 12.0);
+        egui::Area::new(egui::Id::new("chat_quote_bubble"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(anchor)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    if ui
+                        .small_button("→ チャットへ")
+                        .on_hover_text("選択範囲を出典付きでチャット入力欄に追記")
+                        .clicked()
+                    {
+                        self.chat_quote_state = ChatQuoteState::PendingInject;
+                    }
+                });
+            });
     }
 }
 
