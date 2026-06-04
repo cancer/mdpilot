@@ -1,169 +1,129 @@
-# Markdown プレビュー仕様
+# プレビューペイン仕様
+
+## 0. 重要な仕様変更（2026-06-05）
+
+ユーザー判断により、**markdown プレビュー（rendered view）は実装しない**。
+左ペインは markdown ソースを syntect でハイライトして行番号付きで表示する
+**read-only ソースビュー**に置き換わった。
+
+理由・背景:
+
+- 「markdown としての validation」を実装する案も検討したが、pulldown-cmark /
+  markdown-rs / comrak のいずれも markdown spec の寛容性に従う設計のため
+  「syntax 異常」として自動検出できるものは限定的（未解決参照リンクなど）。
+  ROI が低く、validation 機能も同時に omit
+- 「重要なのは Claude Code でドキュメントを書けること、書いたドキュメントを
+  すぐさま目視できること」（ユーザー発言）→ rendered preview は必須ではなく、
+  ソース表示で目視できれば十分という判断
+
+このドキュメントの旧バージョン（egui_commonmark で render markdown を扱う
+仕様）は git history で参照可能。
 
 ## 1. 概要
 
-左ペインに Markdown ファイルをレンダリングして表示する。ユーザーは閲覧専用（手動編集機能なし）。Claude Code がファイルを書き換えると自動でリロード・再レンダリングする。
+左ペインは現在開いている markdown ファイルのソースを表示する。
 
-レンダラには `egui_commonmark` を採用する想定（最終確認は実装着手時）。
+- ユーザーは閲覧専用（編集不可）
+- syntect で markdown syntax highlight
+- 左カラムに行番号（gutter）
+- 縦スクロール、テキスト選択・コピーは可能
+- Claude Code がファイルを書き換えると自動でリロードして再表示
 
-## 2. 対応 Markdown 仕様
-
-### 2.1 CommonMark（基本）
-
-[CommonMark 0.31.2](https://spec.commonmark.org/0.31.2/) を基本仕様とする。
-
-| 要素 | 対応 |
-|---|---|
-| 見出し（ATX `#`〜`######`） | ◯ |
-| 段落 | ◯ |
-| 強調（`*` / `_`）・太字（`**`） | ◯ |
-| インラインコード | ◯ |
-| コードブロック（フェンス / インデント） | ◯（シンタックスハイライト付き、4 章） |
-| 引用ブロック | ◯ |
-| 順序付き／順序なしリスト | ◯ |
-| リンク（インライン・参照） | ◯（挙動は 5 章） |
-| 画像 | ◯（挙動は 6 章） |
-| 水平線 | ◯ |
-| 生 HTML | **未対応**。egui_commonmark 0.23 は `<br>` を含む生 HTML タグを解釈せず、文字列としてそのまま表示する（`docs/spike-report.md` 0.5.2 追加検証で確認）。改行を入れたい場合は Markdown の段落区切り（空行）かハードブレーク（行末 2 スペース）を使う |
-
-### 2.2 GFM 拡張
-
-| 要素 | 対応 |
-|---|---|
-| テーブル | ◯（MVP 必須） |
-| タスクリスト（`- [ ]` / `- [x]`） | ◯（MVP 必須） |
-| 取り消し線（`~~`） | ◯（MVP 必須） |
-| 自動リンク（裸 URL） | ◯ |
-| 脚注 | ◯ できれば。`egui_commonmark` 対応状況次第 |
-| 絵文字ショートコード（`:smile:`） | 非対応 |
-
-### 2.3 拡張機能（MVP 後）
-
-- 数式（KaTeX / MathJax 相当）
-- Mermaid ダイアグラム
-- フロントマター（YAML/TOML）表示・隠蔽
-- ToC（目次）自動生成
-
-## 3. レンダラ
-
-| 項目 | 採用 |
-|---|---|
-| Markdown レンダラ | `egui_commonmark`（暫定） |
-| Markdown パーサ | `pulldown-cmark`（`egui_commonmark` 内部依存） |
-
-`egui_commonmark` で 2.1 / 2.2 がすべて満たせるかは実装着手時に検証する。満たせない場合は以下のいずれか：
-
-- 不足機能は自前で AST から描画ロジックを追加
-- 別レンダラ（`comrak` + 自前 egui 描画）に切替
-
-## 4. シンタックスハイライト
+## 2. レンダリング
 
 | 項目 | 内容 |
 |---|---|
-| エンジン | `syntect`（`egui_commonmark` の `better_syntax_highlighting` feature 経由） |
-| シンタックス定義 | `syntect` 同梱の Sublime Text 構文ファイル |
-| テーマ | OS のダーク/ライト連動で 2 種類を持つ。既定: ダーク=`base16-ocean.dark`、ライト=`InspiredGitHub`（いずれも `syntect::ThemeSet::load_defaults` に含まれる）。テーマ切替は `egui_commonmark` が `ui.style().visuals.dark_mode` から判定 |
-| コードブロックの言語指定 | フェンスの info string（` ```rust ` 等）から判定 |
-| 言語指定なし | プレーンテキストとして表示 |
-| 大きなファイル | **ファイル全体が 1MB（`SizeClass::Large`）以上のとき、syntect ハイライトを一括無効化**（per-block ではない、MVP の妥協）。実装は `src/preview/render.rs::strip_code_block_info_strings` で全 fenced code block の info-string を剥がして `egui_commonmark` の `plain_highlighting` に流す。Phase 9 で per-block 判定に精緻化する余地あり |
+| ハイライトエンジン | `syntect` 5 (default-fancy features) |
+| シンタックス定義 | `syntect` 同梱の `markdown.sublime-syntax` |
+| テーマ | OS のダーク/ライト連動。ダーク=`base16-ocean.dark`、ライト=`InspiredGitHub`（いずれも `syntect::ThemeSet::load_defaults` に含まれる）。判定は `ui.style().visuals.dark_mode` |
+| フォント | egui の `FontId::monospace(13.0)`（CJK 部分は `ui::fonts::install_japanese` のフォールバックチェーン） |
+| 行番号 gutter | 行番号を右寄せ + ` │ ` セパレータで本文の左にプレフィックスとして付与（同一 `LayoutJob` の中で構築） |
+| 1 ファイル全体 | 1 つの `LayoutJob` として組み立てて `egui::Label::new(job).selectable(true)` で描画 |
 
-## 5. リンク挙動
+実装は `src/preview/render.rs::build_layout_job`。
 
-| 種別 | 挙動 |
-|---|---|
-| 外部 URL（`http://` / `https://`） | OS の既定ブラウザで開く |
-| ファイルパス（相対）かつ `.md` 拡張子 | プレビュー対象ファイルを切り替えて表示 |
-| ファイルパス（相対）かつ `.md` 以外 | OS の既定アプリで開く |
-| 絶対パス（`/...`、`C:\...`） | 相対と同じ扱い |
-| アンカー（`#section`） | 同一プレビュー内でスクロール |
-| メールリンク（`mailto:`） | OS の既定メーラで開く |
+## 3. リンク・画像
 
-セキュリティ：相対パスは現在のプレビューファイルのディレクトリを基準に解決する。`..` を含むパスでもファイルシステムの権限の範囲で許可する（mdpilot 側でのアクセス制限はしない）。
+markdown ソースを **テキストとしてそのまま表示する**ため、リンクや画像は
+クリックできず、画像のインライン表示もない。`[](...)` `![](...)` の文字列が
+そのまま見える。
 
-## 6. 画像・相対パス解決
+旧仕様（rendered preview）にあった以下は **すべて削除**:
 
-| 種別 | 挙動 |
-|---|---|
-| HTTP/HTTPS URL | **MVP では非対応**。`egui_commonmark` の `fetch` feature を有効化しないため egui_extras の HTTP loader 自体が組み込まれず、結果として警告アイコン（⚠）のみが描画される（spike-report §0.5.2 で確認した不在ファイル時と同じ表示）。代替テキストは出ない |
-| ローカル相対パス | `src/preview/image.rs::rewrite_image_uris` でプレビューファイルのディレクトリ基準で絶対化し、`file://<abs>` URI を egui_commonmark に渡す。pulldown-cmark で image event を抽出 → 元 URL を `dest_url.rfind` で source 中に再発見 → 該当範囲を `file://...` で置換 |
-| ローカル絶対パス | Unix `/...` および Windows `C:\...` / `C:/...` を `is_windows_absolute` で判定し、base_dir に依らず `file://<abs>` 化 |
-| `data:` URL | `egui_commonmark` の `embedded_image` feature 経由で `data_url_loader` が処理する。書き換え対象から除外 |
-| サポートフォーマット（MVP）| PNG / JPEG / SVG / `data:` URL。`Cargo.toml` で `egui_commonmark` features に `svg` と `embedded_image` を有効化、`image` クレートに `png` + `jpeg` を有効化（cargo の feature unification で egui_extras 側も同じ設定が使われる）。GIF / WebP は egui_extras の追加 loader feature が必要なため MVP では対応せず Phase 9.1 で検討 |
-| 不在ローカルファイル | 警告アイコン（⚠）のみが描画される。代替テキスト（alt）は表示されない（`docs/spike-report.md` 0.5.2 で確認）。MVP の挙動として許容 |
+- 相対 `.md` リンククリックでの preview 切替（旧 Phase 4.4）
+- インライン画像表示（旧 Phase 4.5）
+- 外部 URL クリックで OS ブラウザ起動
+- 相対画像・PDF クリックで OS 既定アプリ起動
 
-書き換えの既知の限界（MVP 妥協）:
-
-- `pulldown-cmark` は image の `dest_url` をアンエスケープして返す（`\(` → `(`、`&amp;` → `&` 等）ため、source 中に同じバイト列が見つからないと書き換えを諦めて元 URL のまま egui_commonmark に渡す。結果としてエスケープ・HTML entity を含む相対 URL は描画されない（警告アイコンのみ）。Phase 9.1 で精緻化する余地あり
-- Reference style（`![alt][ref]` + 別箇所の `[ref]: url`）も pulldown-cmark が dest_url を返すため対象になるが、参照定義側の URL のみが書き換えられる挙動は未検証
-
-ローカル画像の自動リロード：プレビュー対象 `.md` ファイルだけでなく、参照される画像ファイルの変更も検出してリロードするかは未確定（MVP では `.md` 更新時にすべて再読込）。
-
-## 7. 自動リロード（ファイル監視）
+## 4. ファイルロード
 
 | 項目 | 内容 |
 |---|---|
-| 監視ライブラリ | `notify`（cross-platform） |
-| 監視対象 | プレビュー対象ファイル 1 個。ファイル切り替え時に Watcher も切り替え |
-| デバウンス | 100ms。連続書き込みを1イベントに集約 |
-| エラー処理 | 監視開始失敗時はステータスバーにエラー表示。リロードはユーザーが `Cmd+R`/`Ctrl+R` で手動可能 |
-| ファイル削除 | プレビューを「ファイルが見つかりません」状態に切り替え。再作成されたら自動的に表示再開 |
+| 実装 | `src/preview/loader.rs::load_markdown(path)` |
+| エラー | `NotFound` / `PermissionDenied` / `NotUtf8` / `TooLarge { size_bytes }` / `Io(String)` |
+| Hard limit | 10 MiB（`HARD_LIMIT_BYTES`）。超過時は body を読まずに `TooLarge` を返す |
+| Soft limit | 1 MiB（`SOFT_LIMIT_BYTES`）。超過時は `SizeClass::Large` でロード、ペイン上部に警告バナーを表示 |
 
-## 8. スクロール挙動
+`SizeClass::Large` でも syntect ハイライトは普通に走る（旧仕様では fence
+info-string を剥がしてプレーン化していたが、ソース表示ではその意味がない
+ため削除）。
 
-- プレビューは縦スクロール。横スクロールは原則発生させない（テーブル等が幅を超える場合はテーブル内で横スクロール）
-- 起動直後は最上端から表示
-- ファイル再読込時 / 別ファイル切替時はスクロールを常にリセットし、最上端から表示する
-- スクロール位置保持・編集追従は仕様から除外（2026-06-04 ユーザー判断、F-22 / Phase 9.2 / Phase 9.14 を削除）
+## 5. 自動リロード（ファイル監視）
 
-## 9. プレビュー対象ファイルの指定方法
+| 項目 | 内容 |
+|---|---|
+| 監視ライブラリ | `notify` 8 |
+| 単一ファイル監視 | `preview::watcher::FileWatcher`（`NonRecursive`）。現在開いているファイルを監視 |
+| プロジェクト監視 | `preview::watcher::ProjectWatcher`（`Recursive`）。`.md` のみ通す（画像は対象外） |
+| デバウンス | リロード 100ms、自動追従 200ms |
+| エラー処理 | 監視開始失敗時はタブの `watcher_error` バナーに表示。リロードは `Cmd+R`/`Ctrl+R` で手動可能 |
+| ファイル削除 | プレビューを「ファイルが見つかりません」状態に切替。再作成されたら次の Change イベントで自動的に表示再開 |
 
-### 9.1 初期表示の決定（起動時）
+## 6. スクロール挙動
 
-起動時に表示するファイルは以下の優先順位で決まる：
+- 縦スクロールのみ。`ScrollArea::vertical()` で `auto_shrink([false, false])`
+- 起動直後は最上端
+- ファイル再読込時 / 別ファイル切替時はスクロール位置を常にリセット（egui の
+  `ScrollArea` がデフォルトで状態を持たない構成）
+- スクロール位置保持・編集追従は仕様から除外（2026-06-04 ユーザー判断）
 
-1. `Cmd+O`/`Ctrl+O` でユーザーがファイル選択ダイアログから選んだファイル（起動後の操作）。**この場合は自動追従が OFF になる**
-2. コマンドライン引数で渡したパス（`mdpilot path/to/file.md` で起動）
-3. コマンドライン引数がプロジェクトディレクトリの場合、ルート直下の `README.md`（大文字小文字を区別しない検索）
+## 7. プレビュー対象ファイルの指定方法
+
+### 7.1 初期表示の決定（起動時）
+
+1. `Cmd+O`/`Ctrl+O` でユーザーがファイル選択ダイアログから選んだファイル
+   （起動後の操作）。この場合は自動追従が OFF になる
+2. コマンドライン引数で渡したパス（`mdpilot path/to/file.md`）
+3. コマンドライン引数がプロジェクトディレクトリの場合、ルート直下の
+   `README.md`（大文字小文字を区別しない検索）
 4. 上記いずれも無ければ空ペイン（プレースホルダ表示）
 
-### 9.2 起動後の自動切替
+### 7.2 起動後の自動切替
 
-起動後、自動追従モードが ON のとき、プロジェクトルート以下の `.md` ファイル書込み（claude / 外部エディタ / 任意のプロセス由来を区別しない）を `notify` が検出すると、表示中ファイル以外への書込みでプレビュー対象を切替える（`claude-integration.md` 5 章 案 A、6 章 詳細仕様）。
+自動追従モードが ON のとき、プロジェクトルート以下の `.md` ファイル書込みを
+`notify` が検出すると、表示中ファイル以外への書込みでプレビュー対象を切替
+（`claude-integration.md` §5 案 A、§6 詳細仕様）。stream-json `tool_use` 解釈
+（案 B）や MCP（案 C）は MVP 後。
 
-mdpilot は claude の stream-json 出力（`tool_use` イベント）を直接解釈してプレビュー対象を切り替えない。検出経路はファイルシステムイベントのみ。stream-json `tool_use` 解釈は `claude-integration.md` 5.1 案 B として MVP 後の拡張。
+### 7.3 切替時の動作
 
-### 9.3 切替時の動作
-
-- 現在の Watcher を停止し、新ファイルに対する Watcher を開始
+- 現在の `FileWatcher` を停止し、新ファイルに対する Watcher を開始
 - スクロール位置はリセット
-- ウィンドウタイトルを更新（`ui.md` 4 章）
+- ウィンドウタイトルを更新（`ui.md` §4）
 
-## 10. 大きなファイルへの対応
+## 8. 大きなファイル
 
 | 状況 | 動作 |
 |---|---|
-| 1MB 未満 | 通常通り全レンダリング |
-| 1MB 以上 10MB 未満 | レンダリング時に警告ステータスを表示。同期レンダリングだとフレーム落ちの可能性 |
-| 10MB 以上 | 「ファイルが大きすぎるため表示できません」エラー。先頭 N KB のみ表示するかは MVP 後検討 |
+| 1 MiB 未満（`SizeClass::Small`） | 通常通り全行 syntect highlight |
+| 1 MiB 以上 10 MiB 未満（`SizeClass::Large`） | ペイン上部に警告バナーを表示してから全行 syntect highlight |
+| 10 MiB 以上 | `TooLarge` エラーバナー、本文ロードしない |
 
-数値（しきい値）は MVP の暫定値。
-
-## 11. 表示しないもの・MVP 非対応
-
-- HTML の `<script>` / `<iframe>` 等のアクティブコンテンツ
-- HTTP/HTTPS 画像
-- 数式・Mermaid
-- 絵文字ショートコード（`:smile:`）
-- フロントマターの整形表示（生のまま表示か、無視するかは未確定）
-
-## 12. 既知の制限・未確定事項
+## 9. 既知の制限・未確定事項
 
 | 項目 | 状態 |
 |---|---|
-| `egui_commonmark` が GFM 全機能をカバーするかの検証 | 実装着手時 |
-| プレビュー内検索（`Cmd+F`） | MVP 後 |
-| 印刷・PDF エクスポート | スコープ外 |
-| 画像のローカルキャッシュ | MVP 後 |
-| フロントマターの扱い | 未確定 |
-| シンタックスハイライトのテーマ切替 UI | MVP 後 |
+| プレビュー内検索（`Cmd+F`） | 仕様削除（2026-06-05 ユーザー判断、Phase 9.11 omit） |
+| syntect ハイライトの per-frame コスト | 巨大ファイル（数 MiB）で 1 フレーム描画コストが嵩む可能性。キャッシュは未実装 |
+| テーマ切替 UI | MVP 後 |
 | 大きなファイルのしきい値 | 上記は暫定 |
