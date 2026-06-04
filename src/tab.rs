@@ -67,6 +67,18 @@ pub struct Tab {
     pub session: Option<ChatSession>,
     pub events_rx: Option<Receiver<ChatEvent>>,
     pub disconnect_announced: bool,
+    /// Claude session ID — either generated fresh or restored from
+    /// `SessionStore`. Exposed so App can persist it after a
+    /// successful spawn (Phase 9.X.1).
+    pub session_id: Uuid,
+    /// Phase 9.X.1: set `true` once the first `system/init` event
+    /// arrives, which is claude's confirmation that the session was
+    /// successfully created (for new sessions) or resumed (for
+    /// `--resume`) at the requested id. `App::logic` polls this to
+    /// decide when to persist the session-id to disk — we only
+    /// want to save ids that claude actually knows about, not ones
+    /// that we generated but never used.
+    pub session_confirmed: bool,
 
     // ----- document side -----
     pub preview: PreviewState,
@@ -78,21 +90,41 @@ pub struct Tab {
     pub watcher_error: Option<String>,
 }
 
+/// Optional handle for resuming an existing claude session.
+/// When `Some`, the tab spawns with `--session-id <id> --continue`;
+/// otherwise it spawns with a fresh UUID and no `--continue`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResumeSession {
+    pub session_id: Uuid,
+}
+
 impl Tab {
     /// Construct a fully-wired tab. Spawns the claude child process
     /// (with `project_root` as its cwd) and the per-tab
     /// `FileWatcher`. `initial_preview` is the document state the
     /// tab starts with — startup uses `project::initial_preview`,
     /// `Cmd+T` passes `PreviewState::default()` for an empty pane.
+    ///
+    /// `resume` is `Some(_)` for the F-11 startup path where we
+    /// load the previous run's session-id from `SessionStore`;
+    /// `None` for a new tab where we mint a fresh UUID.
     pub fn new(
         ctx: &egui::Context,
         project_root: &Path,
         initial_preview: PreviewState,
         id: TabId,
         label: String,
+        resume: Option<ResumeSession>,
     ) -> Self {
         let mut chat = ChatHistory::default();
-        let (session, events_rx) = match spawn_session(ctx, project_root.to_path_buf()) {
+        let session_id = resume.map(|r| r.session_id).unwrap_or_else(Uuid::new_v4);
+        let continue_session = resume.is_some();
+        let (session, events_rx) = match spawn_session(
+            ctx,
+            project_root.to_path_buf(),
+            session_id,
+            continue_session,
+        ) {
             Ok((session, rx)) => (Some(session), Some(rx)),
             Err(err) => {
                 tracing::warn!(error = %err, "failed to spawn claude session");
@@ -122,6 +154,8 @@ impl Tab {
             session,
             events_rx,
             disconnect_announced: false,
+            session_id,
+            session_confirmed: false,
             preview: initial_preview,
             watcher,
             watch_events_rx,
@@ -157,13 +191,21 @@ impl Tab {
 
     /// Pull every pending chat event off the receiver and fold it
     /// into history. Mirrors the pre-refactor App::drain_chat_events.
+    /// Side-effect: flips `session_confirmed = true` on the first
+    /// `system/init` event so App knows the session-id is real and
+    /// can be persisted to disk (Phase 9.X.1 F-11).
     pub fn drain_chat_events(&mut self) {
         let Some(rx) = self.events_rx.as_ref() else {
             return;
         };
         loop {
             match rx.try_recv() {
-                Ok(event) => self.chat.apply(event),
+                Ok(event) => {
+                    if matches!(&event, ChatEvent::Init { .. }) {
+                        self.session_confirmed = true;
+                    }
+                    self.chat.apply(event);
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if !self.disconnect_announced {
@@ -346,14 +388,16 @@ impl Tab {
 fn spawn_session(
     ctx: &egui::Context,
     project_root: PathBuf,
+    session_id: Uuid,
+    continue_session: bool,
 ) -> std::io::Result<(ChatSession, Receiver<ChatEvent>)> {
     let (tx, rx) = mpsc::channel::<ChatEvent>();
     let wake_ctx = ctx.clone();
     let session = ChatSession::start(
         SpawnOptions {
             project_root,
-            session_id: Uuid::new_v4(),
-            continue_session: false,
+            session_id,
+            continue_session,
             model: None,
         },
         tx,

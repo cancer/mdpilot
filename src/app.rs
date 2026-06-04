@@ -5,14 +5,17 @@ use std::time::Instant;
 use eframe::egui;
 
 use crate::chat::quote;
+use crate::chat::session_store::SessionStore;
 use crate::cli::CliOptions;
+use crate::config::paths::AppPaths;
 use crate::preview::link::{self, LinkAction};
 use crate::preview::loader::{self};
 use crate::preview::render::{PreviewState, PreviewStatus};
 use crate::preview::watcher::{self, FileWatchEvent, ProjectWatcher};
 use crate::project::{self, ProjectInit};
-use crate::tab::{Tab, TabIdGen};
+use crate::tab::{ResumeSession, Tab, TabIdGen};
 use crate::ui::tab_bar::{self, TabBarAction, TabBarItem};
+use uuid::Uuid;
 
 pub struct App {
     /// Phase 9.5: workspace tabs. Each tab owns a chat session and
@@ -62,6 +65,19 @@ pub struct App {
     /// reachable via the `Event::Copy` → `OutputCommand::CopyText`
     /// round-trip. See the variants for the per-frame transitions.
     chat_quote_state: ChatQuoteState,
+
+    /// Phase 9.X.1 F-11: path to `<data_dir>/sessions.json`. `None`
+    /// when `AppPaths::resolve()` failed (no home dir), in which
+    /// case session persistence is silently disabled.
+    session_store_path: Option<PathBuf>,
+    /// Phase 9.X.1 F-11: latch tracking whether we've already
+    /// written the active session-id to disk this run. We persist
+    /// once, only after claude's `system/init` event confirms the
+    /// session is real (`Tab::session_confirmed`). Saving before
+    /// confirmation would record ids claude never persisted (e.g.
+    /// when mdpilot is closed before any messages exchange), and
+    /// the next launch would try to resume a ghost session.
+    session_persisted_this_run: bool,
 }
 
 /// Per-frame state for routing a preview selection into the chat
@@ -99,6 +115,30 @@ impl App {
                 }
             };
 
+        let session_store_path = AppPaths::resolve().map(|p| p.data_dir.join("sessions.json"));
+        let resume = session_store_path.as_ref().and_then(|path| {
+            let store = SessionStore::load_or_default(path);
+            let entry = store.get(&project.root)?;
+            match Uuid::parse_str(&entry.session_id) {
+                Ok(uuid) => {
+                    tracing::info!(
+                        session_id = %uuid,
+                        project = %project.root.display(),
+                        "resuming previous claude session (F-11)",
+                    );
+                    Some(ResumeSession { session_id: uuid })
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        stored = %entry.session_id,
+                        error = %err,
+                        "stored session id is not a valid UUID; starting fresh",
+                    );
+                    None
+                }
+            }
+        });
+
         let mut tab_id_gen = TabIdGen::default();
         let initial_preview = initial_preview_state(&project);
         let mut initial_tab = Tab::new(
@@ -107,6 +147,7 @@ impl App {
             initial_preview,
             tab_id_gen.next(),
             "タブ 1".to_string(),
+            resume,
         );
         // Surface the project-watcher startup error on the initial
         // tab's banner if it has no error of its own (the tab's own
@@ -129,13 +170,66 @@ impl App {
             debug_screenshot: DebugScreenshot::from_env(cli),
             startup_started: Some(startup_started),
             chat_quote_state: ChatQuoteState::Idle,
+            session_store_path,
+            session_persisted_this_run: false,
         }
+    }
+
+    /// Phase 9.X.1: write the currently-active tab's session id to
+    /// `<data_dir>/sessions.json`, keyed by project root, but only
+    /// once claude has confirmed the session via `system/init`.
+    /// Silent no-op when:
+    ///
+    /// - the store path could not be resolved (`AppPaths::resolve()`
+    ///   returned `None`),
+    /// - the active tab has no live session (claude spawn failed),
+    /// - the session is not yet confirmed (Init not received),
+    /// - we already saved this run (idempotent flag).
+    ///
+    /// Saving repeatedly with the same id is harmless (upsert is
+    /// idempotent) but wastes IO, so the latch keeps it to one
+    /// write per launch.
+    fn maybe_persist_active_session(&mut self) {
+        if self.session_persisted_this_run {
+            return;
+        }
+        let Some(path) = self.session_store_path.as_ref() else {
+            return;
+        };
+        let tab = &self.tabs[self.active_tab];
+        if tab.session.is_none() || !tab.session_confirmed {
+            return;
+        }
+        let mut store = SessionStore::load_or_default(path);
+        store.upsert(
+            &self.project_root,
+            tab.session_id.to_string(),
+            "unknown".to_string(),
+        );
+        if let Err(err) = store.save_atomic(path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to save session store",
+            );
+            // Don't latch — retry next frame in case it was a
+            // transient IO error.
+            return;
+        }
+        tracing::info!(
+            session_id = %tab.session_id,
+            project = %self.project_root.display(),
+            "persisted session-id (F-11)",
+        );
+        self.session_persisted_this_run = true;
     }
 
     /// Create a fresh tab with an empty preview and append it to
     /// `tabs`. The new tab becomes active. Per `docs/preview.md`
     /// §9.1.4: starting empty matches the "no positional arg, no
-    /// README" startup path.
+    /// README" startup path. Phase 9.X.1: `Cmd+T` always mints a
+    /// new claude session — only the startup tab is eligible for
+    /// `--continue` resume.
     fn new_tab(&mut self) {
         let id = self.tab_id_gen.next();
         let label = format!("タブ {}", id.raw());
@@ -145,6 +239,7 @@ impl App {
             PreviewState::default(),
             id,
             label,
+            None,
         );
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
@@ -637,6 +732,7 @@ impl eframe::App for App {
         self.consume_new_tab_shortcut(ctx);
         self.consume_close_tab_shortcut(ctx);
         self.consume_tab_switch_shortcuts(ctx);
+        self.maybe_persist_active_session();
         self.update_window_title(ctx);
     }
 

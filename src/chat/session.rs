@@ -224,6 +224,22 @@ pub(crate) fn pipe_lines_to_tracing<R: BufRead>(reader: R) {
 
 /// Assemble the CLI argument list for `claude`. Kept as a pure function so
 /// we can unit test the contract without spawning a process.
+///
+/// Resume semantics (Phase 9.X.1): `claude` rejects the combination
+/// `--session-id <X> --continue` with the error
+///
+/// > --session-id can only be used with --continue or --resume if
+/// > --fork-session is also specified.
+///
+/// So we pick exactly one of two argument shapes:
+///
+/// - **New session** (`continue_session == false`): pass
+///   `--session-id <uuid>` so the next claude process uses *our*
+///   generated UUID. No `--continue` / `--resume`.
+/// - **Resume by id** (`continue_session == true`): pass
+///   `--resume <uuid>` so claude reopens that specific session.
+///   `--session-id` is omitted; with `--resume` claude takes the
+///   id from the positional value.
 pub(crate) fn build_args(opts: &SpawnOptions) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "--print".into(),
@@ -232,11 +248,13 @@ pub(crate) fn build_args(opts: &SpawnOptions) -> Vec<String> {
         "--output-format=stream-json".into(),
         "--include-partial-messages".into(),
         "--dangerously-skip-permissions".into(),
-        "--session-id".into(),
-        opts.session_id.to_string(),
     ];
     if opts.continue_session {
-        args.push("--continue".into());
+        args.push("--resume".into());
+        args.push(opts.session_id.to_string());
+    } else {
+        args.push("--session-id".into());
+        args.push(opts.session_id.to_string());
     }
     if let Some(model) = &opts.model {
         args.push("--model".into());
@@ -264,6 +282,8 @@ mod tests {
 
     #[test]
     fn baseline_args_include_required_flags() {
+        // New-session shape: --session-id is included, --resume is
+        // not, claude generates the session under our UUID.
         let args = build_args(&opts(false));
         for required in [
             "--print",
@@ -283,21 +303,32 @@ mod tests {
     }
 
     #[test]
-    fn new_session_omits_continue() {
+    fn new_session_uses_session_id_not_resume() {
+        // claude rejects --session-id + --continue / --resume
+        // without --fork-session, so the new-session path must NOT
+        // include the resume flag.
         let args = build_args(&opts(false));
         assert!(
-            !args.iter().any(|a| a == "--continue"),
-            "new session should not pass --continue: {args:?}",
+            !args.iter().any(|a| a == "--resume" || a == "--continue"),
+            "new session must not pass --resume or --continue: {args:?}",
         );
     }
 
     #[test]
-    fn resumed_session_includes_continue() {
+    fn resumed_session_uses_resume_not_session_id() {
+        // The resume path must use `--resume <uuid>` exclusively;
+        // including `--session-id` alongside would trip claude's
+        // own validation (see build_args doc).
         let args = build_args(&opts(true));
         assert!(
-            args.iter().any(|a| a == "--continue"),
-            "resumed session should pass --continue: {args:?}",
+            args.iter().any(|a| a == "--resume"),
+            "resumed session must pass --resume: {args:?}",
         );
+        assert!(
+            !args.iter().any(|a| a == "--session-id"),
+            "resumed session must not also pass --session-id: {args:?}",
+        );
+        assert!(args.contains(&fixed_uuid().to_string()));
     }
 
     #[test]
