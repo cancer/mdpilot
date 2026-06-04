@@ -5,6 +5,7 @@ mod config;
 mod error;
 mod preview;
 mod project;
+mod tab;
 mod ui;
 
 fn main() -> eframe::Result {
