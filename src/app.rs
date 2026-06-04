@@ -11,6 +11,7 @@ use crate::preview::render::{PreviewState, PreviewStatus};
 use crate::preview::watcher::{self, FileWatchEvent, ProjectWatcher};
 use crate::project::{self, ProjectInit};
 use crate::tab::{Tab, TabIdGen};
+use crate::ui::tab_bar::{self, TabBarAction, TabBarItem};
 
 pub struct App {
     /// Phase 9.5: workspace tabs. Each tab owns a chat session and
@@ -18,10 +19,13 @@ pub struct App {
     /// UI draws and the project-event drain routes to.
     tabs: Vec<Tab>,
     active_tab: usize,
-    /// Mints `TabId`s for new-tab actions; used by Phase 9.5.3's
-    /// `Cmd+T` once that lands.
-    #[allow(dead_code)]
+    /// Mints `TabId`s for new-tab actions (Cmd+T and the `+` button
+    /// on the tab bar).
     tab_id_gen: TabIdGen,
+    /// `App` reuses the egui context for spawning new tabs (each
+    /// tab needs `wake_ui` to repaint on async events). Stashed on
+    /// `App::new` and cloned when a new `Tab` is constructed.
+    ctx: egui::Context,
 
     /// Project-tree watcher (Phase 6.2). Recursive `notify` watcher
     /// rooted at `project_root`; events flow through
@@ -97,6 +101,7 @@ impl App {
             tabs: vec![initial_tab],
             active_tab: 0,
             tab_id_gen,
+            ctx: cc.egui_ctx.clone(),
             _project_watcher: project_watcher,
             project_events_rx,
             project_root: project.root,
@@ -104,6 +109,59 @@ impl App {
             debug_screenshot: DebugScreenshot::from_env(cli),
             startup_started: Some(startup_started),
         }
+    }
+
+    /// Create a fresh tab with an empty preview and append it to
+    /// `tabs`. The new tab becomes active. Per `docs/preview.md`
+    /// §9.1.4: starting empty matches the "no positional arg, no
+    /// README" startup path.
+    fn new_tab(&mut self) {
+        let id = self.tab_id_gen.next();
+        let label = format!("タブ {}", id.raw());
+        let tab = Tab::new(
+            &self.ctx,
+            &self.project_root,
+            PreviewState::default(),
+            id,
+            label,
+        );
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        // Reset the cached window title; the next frame will
+        // recompute it for the new active tab and emit a fresh
+        // ViewportCommand::Title.
+        self.last_window_title.clear();
+    }
+
+    /// Close the tab at `idx`. Idempotent at boundaries: refuses
+    /// to close the last remaining tab (mdpilot always has at
+    /// least one workspace). Adjusts `active_tab` so that:
+    ///
+    /// - closing the active tab moves focus to its left neighbor
+    ///   (or the new tab at index 0 if we closed index 0)
+    /// - closing a non-active tab to the *left* of active
+    ///   decrements active_tab by 1 (otherwise the index would
+    ///   skip)
+    fn close_tab(&mut self, idx: usize) {
+        if self.tabs.len() <= 1 || idx >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(idx);
+        if idx < self.active_tab {
+            self.active_tab -= 1;
+        } else if idx == self.active_tab {
+            self.active_tab = idx.min(self.tabs.len() - 1);
+        }
+        self.last_window_title.clear();
+    }
+
+    /// Switch focus to `idx`. No-op if the index is invalid.
+    fn select_tab(&mut self, idx: usize) {
+        if idx >= self.tabs.len() || idx == self.active_tab {
+            return;
+        }
+        self.active_tab = idx;
+        self.last_window_title.clear();
     }
 
     fn active(&self) -> &Tab {
@@ -431,6 +489,31 @@ impl eframe::App for App {
                 elapsed_ms = elapsed.as_millis() as u64,
                 "first frame rendered (N-01)",
             );
+        }
+
+        // Phase 9.5.2 tab bar at the very top. The action drives
+        // tab mutations *after* the borrow on `self.tabs` ends,
+        // matching the send_text / follow_toggled pattern used
+        // below.
+        let tab_action = {
+            let items: Vec<TabBarItem> = self
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(idx, tab)| TabBarItem {
+                    label: &tab.label,
+                    is_active: idx == self.active_tab,
+                })
+                .collect();
+            egui::Panel::top("tab_bar")
+                .show_inside(ui, |ui| tab_bar::show(ui, &items))
+                .inner
+        };
+        match tab_action {
+            TabBarAction::None => {}
+            TabBarAction::Select(idx) => self.select_tab(idx),
+            TabBarAction::Close(idx) => self.close_tab(idx),
+            TabBarAction::NewTab => self.new_tab(),
         }
 
         let active_idx = self.active_tab;
