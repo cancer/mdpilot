@@ -237,6 +237,57 @@ impl App {
         pressed
     }
 
+    /// Phase 9.5.3: `Cmd+T` / `Ctrl+T` opens a new tab (empty
+    /// preview + fresh claude session). Mirrors the `+` button
+    /// in the tab bar.
+    fn consume_new_tab_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::T);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if pressed {
+            self.new_tab();
+        }
+        pressed
+    }
+
+    /// Phase 9.5.3: `Cmd+W` / `Ctrl+W` closes the active tab.
+    /// Refuses to close the last remaining tab (mdpilot always
+    /// has at least one workspace). The `close_tab` method
+    /// already enforces this.
+    fn consume_close_tab_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::W);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if pressed {
+            self.close_tab(self.active_tab);
+        }
+        pressed
+    }
+
+    /// Phase 9.5.3: `Cmd+1..9` / `Ctrl+1..9` switches to the N-th
+    /// tab. Out-of-range indices are silently ignored (the user
+    /// is asking for a tab that isn't there).
+    fn consume_tab_switch_shortcuts(&mut self, ctx: &egui::Context) {
+        // Digit keys 1..9 map to tab indices 0..8. The naming
+        // mismatch (1-based UX, 0-based array) is the standard
+        // editor convention (VS Code, browsers, etc.).
+        const DIGITS: &[egui::Key] = &[
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+            egui::Key::Num7,
+            egui::Key::Num8,
+            egui::Key::Num9,
+        ];
+        for (idx, key) in DIGITS.iter().enumerate() {
+            let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, *key);
+            if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+                self.select_tab(idx);
+            }
+        }
+    }
+
     fn update_window_title(&mut self, ctx: &egui::Context) {
         let new_title = compute_window_title(&self.active().preview.status);
         if new_title == self.last_window_title {
@@ -478,6 +529,9 @@ impl eframe::App for App {
         self.consume_reload_shortcut(ctx);
         self.consume_open_shortcut(ctx);
         self.consume_pane_reset_shortcut(ctx);
+        self.consume_new_tab_shortcut(ctx);
+        self.consume_close_tab_shortcut(ctx);
+        self.consume_tab_switch_shortcuts(ctx);
         self.update_window_title(ctx);
     }
 
