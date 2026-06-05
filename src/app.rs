@@ -863,19 +863,24 @@ impl App {
             .has_selection();
         if !has_selection {
             // Reset the anchor so the next selection re-snaps to the
-            // fresh pointer position. Without this the bubble would
-            // remember the previous selection's spot.
+            // fresh release position.
             self.chat_quote_anchor = None;
             return;
         }
-        // First frame the selection appears: snapshot the pointer
-        // position once. Subsequent frames reuse the cached anchor
-        // so the bubble stays put while the user moves the cursor
-        // toward it. Offset slightly to the lower-right so the
-        // bubble doesn't sit directly under the pointer.
+        // Snap the anchor only on pointer release. egui keeps
+        // `selection_bbox_last_frame` private, so we can't read the
+        // real selection rect; the next-best signal is "where the
+        // user just stopped dragging", which lands near the selection
+        // endpoint. Using `pointer_latest_pos()` instead made the
+        // bubble track the cursor away from the selection.
         if self.chat_quote_anchor.is_none() {
-            if let Some(pos) = ctx.pointer_latest_pos() {
-                self.chat_quote_anchor = Some(pos + egui::vec2(8.0, 12.0));
+            let released = ctx.input(|i| i.pointer.any_released());
+            if released {
+                if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                    // Offset slightly to the lower-right so the
+                    // bubble doesn't overlap the selection end.
+                    self.chat_quote_anchor = Some(pos + egui::vec2(8.0, 12.0));
+                }
             }
         }
         let Some(anchor) = self.chat_quote_anchor else {
