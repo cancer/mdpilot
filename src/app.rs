@@ -67,6 +67,13 @@ pub struct App {
     /// round-trip. See the variants for the per-frame transitions.
     chat_quote_state: ChatQuoteState,
 
+    /// Screen-space anchor for the floating `→ チャットへ` bubble.
+    /// Snapped to the pointer position on the first frame the
+    /// selection appears, then frozen until the selection clears.
+    /// Without this freeze the bubble would track the cursor every
+    /// frame and become unreachable.
+    chat_quote_anchor: Option<egui::Pos2>,
+
     /// Phase 9.X.1 F-11: path to `<data_dir>/sessions.json`. `None`
     /// when `AppPaths::resolve()` failed (no home dir), in which
     /// case session persistence is silently disabled.
@@ -185,6 +192,7 @@ impl App {
             debug_screenshot: DebugScreenshot::from_env(cli),
             startup_started: Some(startup_started),
             chat_quote_state: ChatQuoteState::Idle,
+            chat_quote_anchor: None,
             session_store_path,
             session_persisted_this_run: false,
             session_picker: None,
@@ -854,15 +862,25 @@ impl App {
             .lock()
             .has_selection();
         if !has_selection {
+            // Reset the anchor so the next selection re-snaps to the
+            // fresh pointer position. Without this the bubble would
+            // remember the previous selection's spot.
+            self.chat_quote_anchor = None;
             return;
         }
-        let Some(pointer_pos) = ctx.pointer_latest_pos() else {
+        // First frame the selection appears: snapshot the pointer
+        // position once. Subsequent frames reuse the cached anchor
+        // so the bubble stays put while the user moves the cursor
+        // toward it. Offset slightly to the lower-right so the
+        // bubble doesn't sit directly under the pointer.
+        if self.chat_quote_anchor.is_none() {
+            if let Some(pos) = ctx.pointer_latest_pos() {
+                self.chat_quote_anchor = Some(pos + egui::vec2(8.0, 12.0));
+            }
+        }
+        let Some(anchor) = self.chat_quote_anchor else {
             return;
         };
-        // Offset slightly to the lower-right so the bubble doesn't
-        // sit directly under the pointer (which would block further
-        // click interactions on the selection).
-        let anchor = pointer_pos + egui::vec2(8.0, 12.0);
         egui::Area::new(egui::Id::new("chat_quote_bubble"))
             .order(egui::Order::Foreground)
             .fixed_pos(anchor)
