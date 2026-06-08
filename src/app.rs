@@ -68,18 +68,18 @@ pub struct App {
     chat_quote_state: ChatQuoteState,
 
     /// Screen-space anchor for the floating `→ チャットへ` bubble.
-    /// Snapped to the pointer position on drag-release, then frozen
-    /// until the selection clears.
+    /// Snapped to the pointer position on drag-release.
     chat_quote_anchor: Option<egui::Pos2>,
 
-    /// True when the user explicitly dismissed the bubble this
-    /// "selection session". egui keeps the underlying selection alive
-    /// even when the user clicks elsewhere inside the same label
-    /// (`label_text_selection.rs::on_end_pass` only clears on Escape
-    /// or click outside any selectable label), so without this flag
-    /// the bubble would stick around indefinitely. Reset whenever
-    /// `has_selection()` flips back to false.
+    /// True when a click outside the bubble dismissed it. Reset
+    /// when `has_selection()` flips back to false, so the next
+    /// drag-selection can show a fresh bubble.
     chat_quote_dismissed: bool,
+
+    /// Screen rect occupied by the bubble on the previous frame, used
+    /// to decide whether the next click landed inside the bubble
+    /// (so we don't dismiss while the user is reaching for the button).
+    chat_quote_bubble_rect: Option<egui::Rect>,
 
     /// Phase 9.X.1 F-11: path to `<data_dir>/sessions.json`. `None`
     /// when `AppPaths::resolve()` failed (no home dir), in which
@@ -201,6 +201,7 @@ impl App {
             chat_quote_state: ChatQuoteState::Idle,
             chat_quote_anchor: None,
             chat_quote_dismissed: false,
+            chat_quote_bubble_rect: None,
             session_store_path,
             session_persisted_this_run: false,
             session_picker: None,
@@ -870,27 +871,42 @@ impl App {
             .lock()
             .has_selection();
         if !has_selection {
-            // Selection gone — reset everything so a fresh drag can
-            // produce a new bubble.
             self.chat_quote_anchor = None;
             self.chat_quote_dismissed = false;
+            self.chat_quote_bubble_rect = None;
             return;
         }
+
+        // Distinguish drag-release (range selection just finished)
+        // from a plain click (no drag). egui's
+        // `is_decidedly_dragging()` is true on the same frame the
+        // drag ends; `any_click()` is true on the same frame for a
+        // tap with no drag. They are mutually exclusive at release
+        // time (input_state.rs:1511).
+        let released_drag =
+            ctx.input(|i| i.pointer.any_released() && i.pointer.is_decidedly_dragging());
+        let clicked = ctx.input(|i| i.pointer.any_click());
+        let interact_pos = ctx.input(|i| i.pointer.interact_pos());
+
+        if released_drag {
+            if let Some(pos) = interact_pos {
+                self.chat_quote_anchor = Some(pos + egui::vec2(8.0, 12.0));
+                self.chat_quote_dismissed = false;
+            }
+        } else if clicked {
+            let inside_bubble = match (interact_pos, self.chat_quote_bubble_rect) {
+                (Some(pos), Some(rect)) => rect.contains(pos),
+                _ => false,
+            };
+            if !inside_bubble {
+                self.chat_quote_dismissed = true;
+                self.chat_quote_anchor = None;
+                self.chat_quote_bubble_rect = None;
+            }
+        }
+
         if self.chat_quote_dismissed {
             return;
-        }
-        // Snap the anchor only on pointer release. egui keeps
-        // `selection_bbox_last_frame` private, so we can't read the
-        // real selection rect; the next-best signal is "where the
-        // user just stopped dragging", which lands near the selection
-        // endpoint.
-        if self.chat_quote_anchor.is_none() {
-            let released = ctx.input(|i| i.pointer.any_released());
-            if released {
-                if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                    self.chat_quote_anchor = Some(pos + egui::vec2(8.0, 12.0));
-                }
-            }
         }
         let Some(anchor) = self.chat_quote_anchor else {
             return;
@@ -901,36 +917,15 @@ impl App {
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style())
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let send_clicked = ui
-                                .small_button("→ チャットへ")
-                                .on_hover_text("選択範囲を出典付きでチャット入力欄に追記")
-                                .clicked();
-                            let close_clicked =
-                                ui.small_button("×").on_hover_text("閉じる").clicked();
-                            (send_clicked, close_clicked)
-                        })
-                        .inner
+                        ui.small_button("→ チャットへ")
+                            .on_hover_text("選択範囲を出典付きでチャット入力欄に追記")
+                            .clicked()
                     })
                     .inner
             });
-        let (send_clicked, close_clicked) = area_response.inner;
-        if close_clicked {
-            self.chat_quote_dismissed = true;
-            self.chat_quote_anchor = None;
-            return;
-        }
-        if send_clicked {
+        self.chat_quote_bubble_rect = Some(area_response.response.rect);
+        if area_response.inner {
             self.chat_quote_state = ChatQuoteState::PendingInject;
-            return;
-        }
-        // Click outside the bubble (anywhere else in the window)
-        // dismisses it — even when egui hasn't cleared the underlying
-        // selection. This makes the bubble feel like a normal popup
-        // instead of a sticky overlay.
-        if area_response.response.clicked_elsewhere() {
-            self.chat_quote_dismissed = true;
-            self.chat_quote_anchor = None;
         }
     }
 }
