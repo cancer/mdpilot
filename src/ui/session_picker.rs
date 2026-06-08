@@ -1,5 +1,5 @@
-//! Phase 9.X.2: modal picker that lets the user resume a past
-//! claude session.
+//! Phase 9.X.2 + 10.10: modal picker that lets the user resume a
+//! past claude session, with keyboard navigation.
 //!
 //! Rendered as a centered `egui::Window` over the main UI. The
 //! caller supplies the `SessionMeta` list (already sorted newest
@@ -23,13 +23,32 @@ pub enum SessionPickerAction {
     Resume(Uuid),
 }
 
+/// Phase 10.10: persisted picker state — currently just the selected
+/// card. Kept across frames so j/k movement sticks.
+#[derive(Debug, Default)]
+pub struct SessionPickerState {
+    pub selected: usize,
+}
+
 pub fn show(
     ctx: &egui::Context,
     sessions: &[SessionMeta],
     error: Option<&str>,
+    state: &mut SessionPickerState,
 ) -> SessionPickerAction {
     let mut action = SessionPickerAction::None;
     let mut open = true;
+    // Clamp selection to the visible list each frame.
+    if !sessions.is_empty() && state.selected >= sessions.len() {
+        state.selected = sessions.len() - 1;
+    }
+
+    // Phase 10.10 keynav: handle j/k/Enter/Esc before drawing so the
+    // selection / close decision is reflected immediately.
+    if let Some(nav_action) = handle_keynav(ctx, sessions, state) {
+        action = nav_action;
+    }
+
     egui::Window::new("過去のチャット履歴から再開")
         .open(&mut open)
         .resizable(true)
@@ -45,37 +64,88 @@ pub fn show(
                 ui.separator();
             }
             if sessions.is_empty() {
-                // Phase 9.X.3: 履歴ピッカーは mdpilot が preview を
-                // 記録した session に限定しているため、claude
-                // 自体には履歴があっても 0 件になる場合がある
-                // (旧ビルドで作られた session など)。
                 ui.label(
                     "復元可能なセッションは見つかりませんでした。\
                      一度起動して .md を開いたセッションが対象です。",
                 );
                 return;
             }
+            ui.weak("j/k: 移動  Enter: 再開  Esc: 閉じる");
+            ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for session in sessions {
-                    if draw_card(ui, session) {
+                for (idx, session) in sessions.iter().enumerate() {
+                    let selected = idx == state.selected;
+                    if draw_card(ui, session, selected) {
+                        state.selected = idx;
                         action = SessionPickerAction::Resume(session.session_id);
                     }
                 }
             });
         });
-    if !open {
-        // Window's built-in X button was clicked.
+    if !open && matches!(action, SessionPickerAction::None) {
         action = SessionPickerAction::Close;
     }
     action
 }
 
-/// Render one session card. Returns `true` when the user clicked
-/// on it (modal should resume that session).
-fn draw_card(ui: &mut egui::Ui, session: &SessionMeta) -> bool {
+fn handle_keynav(
+    ctx: &egui::Context,
+    sessions: &[SessionMeta],
+    state: &mut SessionPickerState,
+) -> Option<SessionPickerAction> {
+    let mut action: Option<SessionPickerAction> = None;
+    let events = ctx.input(|i| i.events.clone());
+    for event in events {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        if modifiers.any() {
+            continue;
+        }
+        match key {
+            egui::Key::J | egui::Key::ArrowDown => {
+                if state.selected + 1 < sessions.len() {
+                    state.selected += 1;
+                }
+            }
+            egui::Key::K | egui::Key::ArrowUp => {
+                if state.selected > 0 {
+                    state.selected -= 1;
+                }
+            }
+            egui::Key::Enter => {
+                if let Some(session) = sessions.get(state.selected) {
+                    action = Some(SessionPickerAction::Resume(session.session_id));
+                }
+            }
+            egui::Key::Escape => {
+                action = Some(SessionPickerAction::Close);
+            }
+            _ => {}
+        }
+    }
+    action
+}
+
+/// Render one session card. `selected` is true for the row currently
+/// highlighted by keynav; both pointer click and `Enter` keystroke
+/// commit through the same `SessionPickerAction::Resume` path.
+/// Returns `true` when the user clicked this card.
+fn draw_card(ui: &mut egui::Ui, session: &SessionMeta, selected: bool) -> bool {
     let mut clicked = false;
-    egui::Frame::new()
-        .fill(egui::Color32::from_rgb(40, 40, 40))
+    let bg = if selected {
+        egui::Color32::from_rgb(70, 90, 110)
+    } else {
+        egui::Color32::from_rgb(40, 40, 40)
+    };
+    let frame_resp = egui::Frame::new()
+        .fill(bg)
         .inner_margin(egui::Margin::same(8))
         .outer_margin(egui::Margin::symmetric(0, 4))
         .show(ui, |ui| {
@@ -120,6 +190,9 @@ fn draw_card(ui: &mut egui::Ui, session: &SessionMeta) -> bool {
                 clicked = true;
             }
         });
+    if selected {
+        frame_resp.response.scroll_to_me(Some(egui::Align::Center));
+    }
     clicked
 }
 

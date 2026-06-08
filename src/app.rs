@@ -127,12 +127,14 @@ pub struct App {
     is_unbound: bool,
 }
 
-/// Phase 9.X.2: pre-loaded contents of the resume-picker modal.
-/// Built when the user clicks 履歴; cleared on close or selection.
+/// Phase 9.X.2 + 10.10: pre-loaded contents of the resume-picker
+/// modal plus its keynav state. Built when the user clicks 履歴;
+/// cleared on close or selection.
 #[derive(Debug)]
 struct SessionPickerData {
     sessions: Vec<SessionMeta>,
     error: Option<String>,
+    state: crate::ui::session_picker::SessionPickerState,
 }
 
 /// Per-frame state for routing a preview selection into the chat
@@ -289,17 +291,20 @@ impl App {
                         SessionPickerData {
                             sessions,
                             error: None,
+                            state: Default::default(),
                         }
                     }
                     Err(err) => SessionPickerData {
                         sessions: Vec::new(),
                         error: Some(err.to_string()),
+                        state: Default::default(),
                     },
                 }
             }
             None => SessionPickerData {
                 sessions: Vec::new(),
                 error: Some("ホームディレクトリが取得できません".to_string()),
+                state: Default::default(),
             },
         };
         self.session_picker = Some(data);
@@ -1313,10 +1318,11 @@ impl App {
     /// button or after the user picks a session (which also
     /// opens a new tab via `open_tab_resuming`).
     fn show_session_picker(&mut self, ctx: &egui::Context) {
-        let Some(data) = self.session_picker.as_ref() else {
+        let Some(data) = self.session_picker.as_mut() else {
             return;
         };
-        let action = session_picker::show(ctx, &data.sessions, data.error.as_deref());
+        let action =
+            session_picker::show(ctx, &data.sessions, data.error.as_deref(), &mut data.state);
         match action {
             SessionPickerAction::None => {}
             SessionPickerAction::Close => {
