@@ -94,6 +94,25 @@ impl PreviewState {
             _ => None,
         }
     }
+
+    /// Phase 10.6: convenience that returns the current vim visual
+    /// selection text (`None` outside Visual mode or with an empty
+    /// range). Used by the chat-quote bubble to decide whether to
+    /// show even when egui's selection plugin reports nothing.
+    pub fn vim_visual_text(&self) -> Option<String> {
+        match &self.status {
+            PreviewStatus::Loaded { editor, .. } => {
+                let range = editor.vim.visual_range()?;
+                let buf = editor.vim.buffer();
+                if range.start < range.end && range.end <= buf.len() {
+                    Some(buf[range].to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Three-way state of the preview pane.

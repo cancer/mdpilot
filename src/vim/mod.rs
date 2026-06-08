@@ -44,11 +44,16 @@ pub enum VimEvent {
 }
 
 /// Side-effect summary so the host knows whether to repaint / save.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Action {
     pub buffer_changed: bool,
     pub mode_changed: bool,
     pub cursor_moved: bool,
+    /// Phase 10.6: Visual-mode `Y` requests "ship this selection to
+    /// the chat input." Carrying the text in the Action keeps the
+    /// engine layer egui-free; the host (App) reads it and routes
+    /// to chat.input + format_quote_block.
+    pub send_to_chat: Option<String>,
 }
 
 impl Action {
@@ -445,7 +450,27 @@ impl VimEngine {
             VimEvent::Char('k') => self.motion_up(),
             VimEvent::Char('y') => self.yank_selection(),
             VimEvent::Char('d') | VimEvent::Char('x') => self.delete_selection(),
+            // Phase 10.6 keyboard-only path: `Y` in Visual mode
+            // captures the selection text, exits Visual, and asks
+            // the host to deliver it to the chat input. The capital
+            // `Y` is otherwise unused in our engine (in real vim it
+            // yanks the whole line, which we don't implement).
+            VimEvent::Char('Y') => self.send_visual_to_chat(),
             _ => Action::default(),
+        }
+    }
+
+    fn send_visual_to_chat(&mut self) -> Action {
+        let Some(range) = self.visual_range() else {
+            return Action::default();
+        };
+        let text = self.buffer[range].to_string();
+        self.exit_visual();
+        Action {
+            send_to_chat: Some(text),
+            mode_changed: true,
+            cursor_moved: true,
+            ..Default::default()
         }
     }
 
@@ -756,6 +781,7 @@ impl VimEngine {
             buffer_changed: true,
             mode_changed: true,
             cursor_moved: true,
+            ..Default::default()
         }
     }
 
@@ -769,6 +795,7 @@ impl VimEngine {
             buffer_changed: true,
             mode_changed: true,
             cursor_moved: true,
+            ..Default::default()
         }
     }
 

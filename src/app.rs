@@ -783,6 +783,31 @@ impl App {
             if action.buffer_changed {
                 any_buffer_change = true;
             }
+            // Phase 10.6 keyboard-only quote: when Visual mode's `Y`
+            // packaged the selection into the Action, format it and
+            // append to chat.input here.
+            if let Some(selection) = action.send_to_chat {
+                let (filename, source) = match &tab.preview.status {
+                    PreviewStatus::Loaded { document, editor } => (
+                        document
+                            .path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_string()),
+                        editor.vim.buffer().to_string(),
+                    ),
+                    _ => (None, String::new()),
+                };
+                let block = crate::chat::quote::format_quote_block(
+                    &selection,
+                    Some(&source),
+                    filename.as_deref(),
+                );
+                if !tab.chat.input.is_empty() && !tab.chat.input.ends_with('\n') {
+                    tab.chat.input.push('\n');
+                }
+                tab.chat.input.push_str(&block);
+            }
         }
         if any_buffer_change {
             // Phase 10.4: keystroke save. Frequency is bounded by the
@@ -1388,23 +1413,32 @@ impl App {
         if self.chat_quote_state != ChatQuoteState::Idle {
             return;
         }
-        let has_selection = ctx
+        let egui_has_selection = ctx
             .plugin::<egui::text_selection::LabelSelectionState>()
             .lock()
             .has_selection();
-        if !has_selection {
+        // Phase 10.6 / Visual mode: also fire when the vim engine is
+        // sitting in Visual mode with a non-empty range. The two
+        // sources are mutually exclusive in practice (mouse-drag vs
+        // keyboard `v`) but if both ever fire we prefer the egui one
+        // since it's the original Phase 9.17 path.
+        let vim_visual_active = matches!(
+            self.tabs[self.active_tab].preview.vim_mode(),
+            Some(crate::vim::Mode::Visual)
+        );
+        let vim_has_selection = vim_visual_active
+            && self.tabs[self.active_tab]
+                .preview
+                .vim_visual_text()
+                .is_some_and(|s| !s.is_empty());
+        let any_selection = egui_has_selection || vim_has_selection;
+        if !any_selection {
             self.chat_quote_anchor = None;
             self.chat_quote_dismissed = false;
             self.chat_quote_bubble_rect = None;
             return;
         }
 
-        // Distinguish drag-release (range selection just finished)
-        // from a plain click (no drag). egui's
-        // `is_decidedly_dragging()` is true on the same frame the
-        // drag ends; `any_click()` is true on the same frame for a
-        // tap with no drag. They are mutually exclusive at release
-        // time (input_state.rs:1511).
         let released_drag =
             ctx.input(|i| i.pointer.any_released() && i.pointer.is_decidedly_dragging());
         let clicked = ctx.input(|i| i.pointer.any_click());
@@ -1425,6 +1459,17 @@ impl App {
                 self.chat_quote_anchor = None;
                 self.chat_quote_bubble_rect = None;
             }
+        }
+        // If we entered Visual mode via keyboard without any pointer
+        // release, anchor the bubble to the lower-right of the
+        // window so the user can still find it. The exact location
+        // doesn't matter much since the user reaches it with a
+        // mouse click; the alternative (no bubble at all) is worse.
+        if self.chat_quote_anchor.is_none() && vim_has_selection {
+            let screen = ctx.content_rect();
+            self.chat_quote_anchor =
+                Some(egui::pos2(screen.right() - 160.0, screen.bottom() - 60.0));
+            self.chat_quote_dismissed = false;
         }
 
         if self.chat_quote_dismissed {
@@ -1447,8 +1492,53 @@ impl App {
             });
         self.chat_quote_bubble_rect = Some(area_response.response.rect);
         if area_response.inner {
-            self.chat_quote_state = ChatQuoteState::PendingInject;
+            // Phase 10.6: Visual mode bypasses the Event::Copy
+            // round-trip — we already have the selected text in
+            // memory, so just format + append directly.
+            if vim_has_selection && !egui_has_selection {
+                self.send_vim_visual_to_chat();
+                self.chat_quote_anchor = None;
+                self.chat_quote_bubble_rect = None;
+            } else {
+                self.chat_quote_state = ChatQuoteState::PendingInject;
+            }
         }
+    }
+
+    /// Phase 10.6 / Visual mode: copy the vim engine's visual
+    /// selection into the chat input directly. Mirrors what the
+    /// `Event::Copy` → `OutputCommand::CopyText` round-trip does
+    /// for the mouse-drag path, but skips egui entirely because the
+    /// text lives in `editor.vim.buffer()`.
+    fn send_vim_visual_to_chat(&mut self) {
+        let tab = &mut self.tabs[self.active_tab];
+        let (filename, selection, source) = match &tab.preview.status {
+            PreviewStatus::Loaded { document, editor } => {
+                let Some(range) = editor.vim.visual_range() else {
+                    return;
+                };
+                let buffer = editor.vim.buffer();
+                if range.start >= range.end || range.end > buffer.len() {
+                    return;
+                }
+                let filename = document
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string());
+                let selection = buffer[range].to_string();
+                (filename, selection, buffer.to_string())
+            }
+            _ => return,
+        };
+        if selection.is_empty() {
+            return;
+        }
+        let block = quote::format_quote_block(&selection, Some(&source), filename.as_deref());
+        if !tab.chat.input.is_empty() && !tab.chat.input.ends_with('\n') {
+            tab.chat.input.push('\n');
+        }
+        tab.chat.input.push_str(&block);
     }
 }
 
