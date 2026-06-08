@@ -4,12 +4,14 @@ use eframe::egui;
 
 use crate::chat::history::ChatHistory;
 use crate::preview::render::PreviewState;
+use crate::ui::preview_pane::ConflictAction;
 
 const MIN_PANE_WIDTH: f32 = 240.0;
 const PREVIEW_PANEL_ID: &str = "preview_pane";
 
 pub struct LayoutOutcome {
     pub open_file: Option<PathBuf>,
+    pub conflict_action: ConflictAction,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -19,20 +21,31 @@ pub fn show(
     preview: &mut PreviewState,
     project_root: &Path,
     tree_open: bool,
+    conflict_detected: bool,
     session_alive: bool,
     on_send: &mut dyn FnMut(String),
 ) -> LayoutOutcome {
     let avail = ui.available_width();
     let max_left = (avail - MIN_PANE_WIDTH).max(MIN_PANE_WIDTH);
-    let mut outcome = LayoutOutcome { open_file: None };
+    let mut outcome = LayoutOutcome {
+        open_file: None,
+        conflict_action: ConflictAction::None,
+    };
 
     let preview_response = egui::Panel::left(PREVIEW_PANEL_ID)
         .resizable(true)
         .default_size(avail / 2.0)
         .size_range(MIN_PANE_WIDTH..=max_left)
         .show_inside(ui, |ui| {
-            let inner = crate::ui::preview_pane::show(ui, preview, project_root, tree_open);
+            let inner = crate::ui::preview_pane::show(
+                ui,
+                preview,
+                project_root,
+                tree_open,
+                conflict_detected,
+            );
             outcome.open_file = inner.open_file;
+            outcome.conflict_action = inner.conflict_action;
         });
 
     // Hit-strip on the right edge of the preview pane: a thin column where the

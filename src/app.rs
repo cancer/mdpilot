@@ -1229,6 +1229,8 @@ impl eframe::App for App {
         }
 
         let tree_open_file: Option<PathBuf>;
+        let conflict_action;
+        let conflict_detected = tab.conflict_detected;
         {
             let mut on_send = |text: String| {
                 send_text = Some(text);
@@ -1239,10 +1241,12 @@ impl eframe::App for App {
                 &mut tab.preview,
                 &self.project_root,
                 self.file_tree_open,
+                conflict_detected,
                 session_alive,
                 &mut on_send,
             );
             tree_open_file = outcome.open_file;
+            conflict_action = outcome.conflict_action;
         }
 
         if let Some(text) = send_text {
@@ -1250,6 +1254,15 @@ impl eframe::App for App {
         }
         if let Some(path) = tree_open_file {
             self.open_file_from_tree(path);
+        }
+        match conflict_action {
+            crate::ui::preview_pane::ConflictAction::None => {}
+            crate::ui::preview_pane::ConflictAction::Reload => {
+                self.active_mut().resolve_conflict_with_reload();
+            }
+            crate::ui::preview_pane::ConflictAction::Keep => {
+                self.active_mut().resolve_conflict_with_keep();
+            }
         }
 
         self.show_chat_quote_bubble(ui.ctx());

@@ -94,6 +94,13 @@ pub struct Tab {
     /// this are our own keystroke-save echoes and get dropped. `None`
     /// before any save has happened or while no document is loaded.
     pub last_written_hash: Option<u64>,
+
+    /// Phase 10.5: set when disk changed externally while the local
+    /// buffer also has unsaved changes — i.e. Claude (or another
+    /// tool) edited the file out from under us. The UI surfaces a
+    /// "reload / keep / diff" banner; resolving either way clears
+    /// this flag.
+    pub conflict_detected: bool,
 }
 
 /// Optional handle for resuming an existing claude session.
@@ -175,6 +182,7 @@ impl Tab {
             auto_follow_enabled: true,
             watcher_error,
             last_written_hash: initial_hash,
+            conflict_detected: false,
         };
         tab.sync_watch_target();
         tab
@@ -206,18 +214,49 @@ impl Tab {
         }
     }
 
-    /// Phase 10.4: returns `true` when the current disk hash equals
-    /// what we last wrote — i.e. the just-fired watcher event is our
-    /// own echo. Reads the file to compare; failure to read drops to
-    /// `false` so we fall through to a normal reload attempt.
-    fn is_self_echo(&self, path: &Path) -> bool {
-        let Some(expected) = self.last_written_hash else {
-            return false;
+    /// Phase 10.5: classify a Changed event for the current preview
+    /// target. Reads the file once and compares its hash against
+    /// `last_written_hash` and the in-memory buffer.
+    fn classify_disk_change(&self, path: &Path) -> DiskChange {
+        let Ok(disk_bytes) = std::fs::read(path) else {
+            return DiskChange::Unknown;
         };
-        match std::fs::read(path) {
-            Ok(bytes) => content_hash(&bytes) == expected,
-            Err(_) => false,
+        let disk_hash = content_hash(&disk_bytes);
+        if Some(disk_hash) == self.last_written_hash {
+            return DiskChange::SelfEcho;
         }
+        let buffer_hash = match &self.preview.status {
+            PreviewStatus::Loaded { editor, .. } => {
+                Some(content_hash(editor.vim.buffer().as_bytes()))
+            }
+            _ => None,
+        };
+        // Buffer is "dirty" when it doesn't match last_written_hash.
+        // None last_written_hash means we never wrote, treat as clean
+        // to be conservative.
+        let dirty = match (buffer_hash, self.last_written_hash) {
+            (Some(b), Some(w)) => b != w,
+            _ => false,
+        };
+        if dirty {
+            DiskChange::Conflict
+        } else {
+            DiskChange::ExternalReload
+        }
+    }
+
+    /// Phase 10.5: user picked "discard buffer, reload from disk".
+    pub fn resolve_conflict_with_reload(&mut self) {
+        self.conflict_detected = false;
+        self.reload_current();
+    }
+
+    /// Phase 10.5: user picked "keep my buffer". Re-save so the
+    /// next watcher event compares against our buffer, and clear
+    /// the banner.
+    pub fn resolve_conflict_with_keep(&mut self) {
+        self.conflict_detected = false;
+        self.save_current_buffer();
     }
 
     /// Path the preview is currently looking at (`Loaded`), or
@@ -301,18 +340,33 @@ impl Tab {
                 FileWatchEvent::Changed { path } => {
                     if let Some(current) = current_path.as_deref() {
                         if watcher::paths_match(&path, current) {
-                            // Phase 10.4 echo check: read the disk
-                            // copy and compare against our last-written
-                            // hash. If they match, this watcher event
-                            // is the kernel echoing our own keystroke
-                            // save and we must drop it; otherwise the
-                            // file was changed externally (Claude or
-                            // another tool) and we schedule reload.
-                            if self.is_self_echo(current) {
-                                continue;
+                            // Phase 10.5: three-way classify of the
+                            // disk change.
+                            // - SelfEcho: we just wrote it, drop.
+                            // - Conflict: user has unsaved edits AND
+                            //   the disk diverged → bannered to the
+                            //   user (don't clobber their work).
+                            // - ExternalReload: disk changed and the
+                            //   user has no unsaved edits → reload
+                            //   silently (existing F-08 behavior).
+                            match self.classify_disk_change(current) {
+                                DiskChange::SelfEcho => {}
+                                DiskChange::Conflict => {
+                                    self.conflict_detected = true;
+                                }
+                                DiskChange::ExternalReload => {
+                                    self.pending_reload = Some(Instant::now() + RELOAD_DEBOUNCE);
+                                    ctx.request_repaint_after(RELOAD_DEBOUNCE);
+                                }
+                                DiskChange::Unknown => {
+                                    // Couldn't read the disk; fall
+                                    // back to the cautious behavior
+                                    // of scheduling a reload so the
+                                    // UI doesn't appear frozen.
+                                    self.pending_reload = Some(Instant::now() + RELOAD_DEBOUNCE);
+                                    ctx.request_repaint_after(RELOAD_DEBOUNCE);
+                                }
                             }
-                            self.pending_reload = Some(Instant::now() + RELOAD_DEBOUNCE);
-                            ctx.request_repaint_after(RELOAD_DEBOUNCE);
                         }
                     }
                 }
@@ -470,6 +524,23 @@ pub(crate) fn content_hash(bytes: &[u8]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
     h.finish()
+}
+
+/// Phase 10.5: outcome of `classify_disk_change`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiskChange {
+    /// Disk hash equals `last_written_hash` — our own keystroke save
+    /// just bounced back through the watcher. Drop.
+    SelfEcho,
+    /// Disk diverged from `last_written_hash` AND the buffer also
+    /// diverged → both sides edited. Surface the conflict banner.
+    Conflict,
+    /// Disk diverged but the buffer has no unsaved edits. Schedule
+    /// a normal reload (Phase 5.2 path).
+    ExternalReload,
+    /// Couldn't read disk (race with deletion etc.). Caller falls
+    /// back to a cautious reload.
+    Unknown,
 }
 
 fn spawn_session(
