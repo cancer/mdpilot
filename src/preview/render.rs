@@ -233,14 +233,21 @@ fn show_source_grid(ui: &mut egui::Ui, source: &str, theme_name: &str) {
         egui::Color32::from_gray(40)
     };
 
+    // Separator color: same gray family as the line numbers but
+    // a touch dimmer so it reads as decoration, not text.
+    let separator_color = egui::Color32::from_gray(60);
+    let separator_stroke = egui::Stroke::new(1.0, separator_color);
+    let row_spacing_y: f32 = 0.0;
+    let separator_pad: f32 = 6.0;
+
     egui::Grid::new("preview_source_grid")
         .num_columns(2)
-        .spacing(egui::vec2(0.0, 0.0))
+        .spacing(egui::vec2(separator_pad * 2.0, row_spacing_y))
         .show(ui, |ui| {
             for (idx, raw_line) in LinesWithEndings::from(source).enumerate() {
                 let line_no = idx + 1;
                 let gutter_text = format_gutter(line_no, gutter_width);
-                ui.add(
+                let gutter_resp = ui.add(
                     egui::Label::new(
                         egui::RichText::new(gutter_text)
                             .color(gutter_color)
@@ -248,6 +255,23 @@ fn show_source_grid(ui: &mut egui::Ui, source: &str, theme_name: &str) {
                             .size(SOURCE_FONT_SIZE),
                     )
                     .selectable(false),
+                );
+
+                // Draw the gutter↔body separator as a single line
+                // segment per row. Using `Painter::line_segment`
+                // (instead of putting `│` inside the gutter text)
+                // lets the line span the full row height — the box-
+                // drawing glyph only covers the font's x-height-ish
+                // band, which leaves visible gaps between rows.
+                let sep_x = gutter_resp.rect.right() + separator_pad;
+                let sep_top = gutter_resp.rect.top();
+                // Extend by half of the row spacing so adjacent
+                // rows' segments meet exactly. When row_spacing_y
+                // is 0 this is a no-op.
+                let sep_bottom = gutter_resp.rect.bottom() + row_spacing_y;
+                ui.painter().line_segment(
+                    [egui::pos2(sep_x, sep_top), egui::pos2(sep_x, sep_bottom)],
+                    separator_stroke,
                 );
 
                 // Body for this source line. Drop the trailing '\n'
@@ -282,9 +306,11 @@ fn show_source_grid(ui: &mut egui::Ui, source: &str, theme_name: &str) {
 }
 
 /// Render the gutter cell for `line_no`. Right-aligned in a field
-/// `width` wide, separated from the body by " │ ".
+/// `width` wide. The `│` separator used to live here, but is now
+/// painted as a continuous line by `show_source_grid` so it doesn't
+/// break between rows.
 pub(crate) fn format_gutter(line_no: usize, width: usize) -> String {
-    format!("{:>width$} │ ", line_no, width = width)
+    format!("{:>width$}", line_no, width = width)
 }
 
 fn append(job: &mut egui::text::LayoutJob, text: &str, color: egui::Color32, style: FontStyle) {
@@ -399,9 +425,9 @@ mod tests {
 
     #[test]
     fn gutter_pads_to_width() {
-        assert_eq!(format_gutter(1, 3), "  1 │ ");
-        assert_eq!(format_gutter(42, 3), " 42 │ ");
-        assert_eq!(format_gutter(123, 3), "123 │ ");
+        assert_eq!(format_gutter(1, 3), "  1");
+        assert_eq!(format_gutter(42, 3), " 42");
+        assert_eq!(format_gutter(123, 3), "123");
     }
 
     #[test]
