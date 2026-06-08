@@ -150,6 +150,15 @@ enum ChatQuoteState {
     AwaitingDrain,
 }
 
+/// Phase 10.3 (revised): the 2 or 3 panes the user can cycle focus
+/// through with Cmd+J / Cmd+K.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusedPane {
+    Preview,
+    Chat,
+    Tree,
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, cli: CliOptions, project: ProjectInit) -> Self {
         let startup_started = Instant::now();
@@ -680,33 +689,60 @@ impl App {
         pressed
     }
 
-    /// Phase 10.3 (revised by user feedback): `Cmd+J` sends focus
-    /// to the **preview** (= drop chat focus, drop tree focus). The
-    /// previous direction (J → chat, K → preview) was reported as
-    /// the opposite of intuition; both keys now also clear tree
-    /// focus so toggling away from chat actually lands on the
-    /// preview's vim engine instead of the file tree.
+    /// Phase 10.3 (revised twice): `Cmd+J` / `Cmd+K` cycle focus
+    /// through the open panes. J advances forward
+    /// (Preview → Chat → Tree → Preview …), K advances backward.
+    /// Tree is only included when the sidebar is open.
     fn consume_focus_preview_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::J);
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
-            ctx.memory_mut(|m| m.surrender_focus(crate::chat::view::chat_input_id()));
-            self.file_tree_state.focused = false;
+            self.cycle_focus(ctx, false);
         }
         pressed
     }
 
-    /// Phase 10.3 (revised): `Cmd+K` sends focus to the **chat**
-    /// prompt and drops tree focus so the chat input actually
-    /// receives keys.
     fn consume_focus_chat_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::J);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
-            ctx.memory_mut(|m| m.request_focus(crate::chat::view::chat_input_id()));
-            self.file_tree_state.focused = false;
+            self.cycle_focus(ctx, true);
         }
         pressed
+    }
+
+    fn cycle_focus(&mut self, ctx: &egui::Context, forward: bool) {
+        let panes: Vec<FocusedPane> = if self.file_tree_open {
+            vec![FocusedPane::Preview, FocusedPane::Chat, FocusedPane::Tree]
+        } else {
+            vec![FocusedPane::Preview, FocusedPane::Chat]
+        };
+        let chat_focused = ctx.memory(|m| m.focused() == Some(crate::chat::view::chat_input_id()));
+        let current = if self.file_tree_state.focused {
+            FocusedPane::Tree
+        } else if chat_focused {
+            FocusedPane::Chat
+        } else {
+            FocusedPane::Preview
+        };
+        let idx = panes.iter().position(|p| *p == current).unwrap_or(0);
+        let new_idx = if forward {
+            (idx + 1) % panes.len()
+        } else {
+            (idx + panes.len() - 1) % panes.len()
+        };
+        let target = panes[new_idx];
+        self.file_tree_state.focused = false;
+        ctx.memory_mut(|m| m.surrender_focus(crate::chat::view::chat_input_id()));
+        match target {
+            FocusedPane::Preview => {}
+            FocusedPane::Chat => {
+                ctx.memory_mut(|m| m.request_focus(crate::chat::view::chat_input_id()));
+            }
+            FocusedPane::Tree => {
+                self.file_tree_state.focused = true;
+            }
+        }
     }
 
     /// Phase 10.2: drain pending input events into the active tab's

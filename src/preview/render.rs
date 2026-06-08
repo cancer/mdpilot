@@ -337,23 +337,41 @@ fn show_source_grid(
                 let line_range = line_start_in_buffer..(line_start_in_buffer + line_len);
                 let line_no = idx + 1;
                 let gutter_text = format_gutter(line_no, gutter_width);
-                let gutter_resp = ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(gutter_text)
-                            .color(gutter_color)
-                            .monospace()
-                            .size(SOURCE_FONT_SIZE),
-                    )
-                    .selectable(false),
-                );
+                // Use a Galley for the gutter too so its vertical
+                // metrics match the body's Galley (which we lay out
+                // ourselves to get char-precise cursor positions).
+                // Mixing `ui.add(Label)` for the gutter with manual
+                // Galley layout for the body produced a per-row
+                // baseline drift.
+                let gutter_galley = ui.ctx().fonts_mut(|f| {
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(
+                        &gutter_text,
+                        0.0,
+                        egui::TextFormat {
+                            font_id: egui::FontId::monospace(SOURCE_FONT_SIZE),
+                            color: gutter_color,
+                            ..Default::default()
+                        },
+                    );
+                    f.layout_job(job)
+                });
+                let (gutter_rect, gutter_resp) =
+                    ui.allocate_exact_size(gutter_galley.size(), egui::Sense::hover());
+                ui.painter().add(egui::epaint::TextShape::new(
+                    gutter_rect.min,
+                    gutter_galley,
+                    gutter_color,
+                ));
 
-                let sep_x = gutter_resp.rect.right() + separator_pad;
-                let sep_top = gutter_resp.rect.top();
-                let sep_bottom = gutter_resp.rect.bottom() + row_spacing_y;
+                let sep_x = gutter_rect.right() + separator_pad;
+                let sep_top = gutter_rect.top();
+                let sep_bottom = gutter_rect.bottom() + row_spacing_y;
                 ui.painter().line_segment(
                     [egui::pos2(sep_x, sep_top), egui::pos2(sep_x, sep_bottom)],
                     separator_stroke,
                 );
+                let _ = gutter_resp;
 
                 let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
                 // Phase 10.6 (vis): collect every search-match range
@@ -446,8 +464,8 @@ fn show_source_grid(
                             VimMode::Visual => egui::Color32::from_rgb(220, 180, 70),
                         };
                         let bar_rect = egui::Rect::from_min_max(
-                            egui::pos2(gutter_resp.rect.left() - 4.0, gutter_resp.rect.top()),
-                            egui::pos2(gutter_resp.rect.left() - 1.0, gutter_resp.rect.bottom()),
+                            egui::pos2(gutter_rect.left() - 4.0, gutter_rect.top()),
+                            egui::pos2(gutter_rect.left() - 1.0, gutter_rect.bottom()),
                         );
                         ui.painter().rect_filled(bar_rect, 0.0, cursor_color);
                         let row_tint = cursor_color.linear_multiply(0.16);

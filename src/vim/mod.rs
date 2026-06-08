@@ -553,17 +553,22 @@ impl VimEngine {
     }
 
     fn motion_word_forward(&mut self) -> Action {
-        // Skip current word, then any whitespace, land on next word's
-        // first char. Vim's `w` is more nuanced (punctuation class
-        // changes), but this minimal version covers common cases.
-        let bytes = self.buffer.as_bytes();
+        // Skip the current run of same-class chars (or just 1 char
+        // for CJK, since each CJK char is its own word), then skip
+        // whitespace, then stop on the first non-whitespace char.
+        let s = &self.buffer;
         let mut i = self.cursor;
-        let class = char_class_at(bytes, i);
-        while i < bytes.len() && char_class_at(bytes, i) == class {
-            i = next_char_boundary(&self.buffer, i);
+        let class = char_class_at(s, i);
+        if class == CharClass::Cjk {
+            // Each CJK glyph is its own word.
+            i = next_char_boundary(s, i);
+        } else {
+            while i < s.len() && char_class_at(s, i) == class {
+                i = next_char_boundary(s, i);
+            }
         }
-        while i < bytes.len() && char_class_at(bytes, i) == CharClass::Whitespace {
-            i = next_char_boundary(&self.buffer, i);
+        while i < s.len() && char_class_at(s, i) == CharClass::Whitespace {
+            i = next_char_boundary(s, i);
         }
         if i == self.cursor {
             return Action::default();
@@ -573,47 +578,53 @@ impl VimEngine {
     }
 
     fn motion_word_backward(&mut self) -> Action {
-        // Mirror of `w`.
         if self.cursor == 0 {
             return Action::default();
         }
-        let bytes = self.buffer.as_bytes();
-        let mut i = prev_char_boundary(&self.buffer, self.cursor);
-        while i > 0 && char_class_at(bytes, i) == CharClass::Whitespace {
-            i = prev_char_boundary(&self.buffer, i);
+        let s = &self.buffer;
+        let mut i = prev_char_boundary(s, self.cursor);
+        while i > 0 && char_class_at(s, i) == CharClass::Whitespace {
+            i = prev_char_boundary(s, i);
         }
-        let class = char_class_at(bytes, i);
-        while i > 0 {
-            let prev = prev_char_boundary(&self.buffer, i);
-            if char_class_at(bytes, prev) != class {
-                break;
+        let class = char_class_at(s, i);
+        if class != CharClass::Cjk {
+            while i > 0 {
+                let prev = prev_char_boundary(s, i);
+                if char_class_at(s, prev) != class {
+                    break;
+                }
+                i = prev;
             }
-            i = prev;
         }
+        // CJK case falls through with `i` already at the previous
+        // char's boundary, matching "each CJK char is its own word".
         self.cursor = i;
         Action::cursor_moved()
     }
 
     fn motion_word_end(&mut self) -> Action {
-        let bytes = self.buffer.as_bytes();
+        let s = &self.buffer;
         let mut i = self.cursor;
-        // Step forward at least once so consecutive `e` advances.
-        if i < bytes.len() {
-            i = next_char_boundary(&self.buffer, i);
+        if i < s.len() {
+            i = next_char_boundary(s, i);
         }
-        while i < bytes.len() && char_class_at(bytes, i) == CharClass::Whitespace {
-            i = next_char_boundary(&self.buffer, i);
+        while i < s.len() && char_class_at(s, i) == CharClass::Whitespace {
+            i = next_char_boundary(s, i);
         }
-        if i >= bytes.len() {
+        if i >= s.len() {
             return Action::default();
         }
-        let class = char_class_at(bytes, i);
-        while i < bytes.len() {
-            let next = next_char_boundary(&self.buffer, i);
-            if next >= bytes.len() || char_class_at(bytes, next) != class {
-                break;
+        let class = char_class_at(s, i);
+        if class == CharClass::Cjk {
+            // For CJK, "end of word" is the same char.
+        } else {
+            while i < s.len() {
+                let next = next_char_boundary(s, i);
+                if next >= s.len() || char_class_at(s, next) != class {
+                    break;
+                }
+                i = next;
             }
-            i = next;
         }
         self.cursor = i;
         Action::cursor_moved()
@@ -889,26 +900,49 @@ fn prev_char_boundary(s: &str, pos: usize) -> usize {
 pub enum CharClass {
     Word,
     Punctuation,
+    /// CJK ideographs, kana, hangul. Each char acts as its own word
+    /// boundary so `w` / `b` / `e` step character-by-character
+    /// inside Japanese / Chinese / Korean text instead of swallowing
+    /// the whole run as a single "word".
+    Cjk,
     Whitespace,
     End,
 }
 
-fn char_class_at(bytes: &[u8], pos: usize) -> CharClass {
-    if pos >= bytes.len() {
+/// Char-aware classifier. Operates on `&str` so multi-byte
+/// codepoints are evaluated as a unit (the old byte-level classifier
+/// labelled every UTF-8 continuation byte as `Word`, which is what
+/// caused `w` to jump across whole CJK runs).
+fn char_class_at(s: &str, pos: usize) -> CharClass {
+    if pos >= s.len() {
         return CharClass::End;
     }
-    let b = bytes[pos];
-    if b.is_ascii_whitespace() {
+    let Some(c) = s[pos..].chars().next() else {
+        return CharClass::End;
+    };
+    if c.is_whitespace() {
         CharClass::Whitespace
-    } else if b.is_ascii_alphanumeric() || b == b'_' {
+    } else if is_cjk(c) {
+        CharClass::Cjk
+    } else if c == '_' || c.is_alphanumeric() {
         CharClass::Word
     } else {
-        // Non-ASCII bytes get bucketed as "Word" — good enough for the
-        // initial vim feature set; punctuation handling is approximate.
-        if !b.is_ascii() {
-            CharClass::Word
-        } else {
-            CharClass::Punctuation
-        }
+        CharClass::Punctuation
     }
+}
+
+/// Recognise Hiragana / Katakana / CJK ideographs / Hangul.
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3000..=0x303F   // CJK Symbols and Punctuation
+        | 0x3040..=0x309F // Hiragana
+        | 0x30A0..=0x30FF // Katakana
+        | 0x31F0..=0x31FF // Katakana Phonetic Extensions
+        | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0xAC00..=0xD7AF // Hangul Syllables
+        | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+        | 0xFF00..=0xFFEF // Halfwidth and Fullwidth Forms
+        | 0x20000..=0x2FFFF // Supplementary Ideographic Plane
+    )
 }
