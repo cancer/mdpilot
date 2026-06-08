@@ -310,7 +310,15 @@ fn show_source_grid(
     // Pre-compute the source line that holds the cursor (and where
     // within that line, byte-wise) so we can paint a cursor marker
     // on the matching row below.
-    let cursor_line = editor.map(|ed| line_index_of(source, ed.vim.cursor()));
+    let cursor_pos = editor.map(|ed| ed.vim.cursor());
+    let cursor_line = cursor_pos.map(|p| line_index_of(source, p));
+    // Phase 10.6 (cursor): char-precise cursor. monospace font means
+    // glyph width is uniform — multiply by the line-local column to
+    // get x-offset from the body's left edge. CJK is wider in real
+    // fonts but stays close enough for the bar to read as "the
+    // cursor is around here".
+    let mono_font = egui::FontId::monospace(SOURCE_FONT_SIZE);
+    let char_width = ui.ctx().fonts_mut(|f| f.glyph_width(&mono_font, ' '));
     // Phase 10.6 (vis): match-highlight background. Mid-amber that
     // reads on both syntect themes.
     let match_bg = egui::Color32::from_rgba_unmultiplied(220, 180, 70, 90);
@@ -408,11 +416,10 @@ fn show_source_grid(
                 }
                 let body_resp = ui.add(egui::Label::new(body_job).selectable(true).wrap());
 
-                // Phase 10.2 + this fix: cursor row indicator. Bumped
-                // the body tint from 0.08 → 0.22 for legibility (the
-                // earlier value was nearly invisible), and added a
-                // 3px accent bar along the left edge of the body to
-                // mirror VS Code's active-line indicator.
+                // Cursor row indicator + char-precise cursor bar.
+                // Char-precise is required to see horizontal motion
+                // (h/l/0/$/w/b/e); monospace lets us compute column ×
+                // glyph-width without poking at the Galley.
                 if Some(idx) == cursor_line {
                     if let Some(ed) = editor {
                         let cursor_color = match ed.mode() {
@@ -425,13 +432,18 @@ fn show_source_grid(
                             egui::pos2(gutter_resp.rect.left() - 1.0, gutter_resp.rect.bottom()),
                         );
                         ui.painter().rect_filled(bar_rect, 0.0, cursor_color);
-                        let row_tint = cursor_color.linear_multiply(0.22);
+                        let row_tint = cursor_color.linear_multiply(0.16);
                         ui.painter().rect_filled(body_resp.rect, 0.0, row_tint);
-                        let body_bar = egui::Rect::from_min_max(
-                            body_resp.rect.left_top(),
-                            egui::pos2(body_resp.rect.left() + 3.0, body_resp.rect.bottom()),
-                        );
-                        ui.painter().rect_filled(body_bar, 0.0, cursor_color);
+                        if let Some(cur) = cursor_pos {
+                            let line_local_byte = cur.saturating_sub(line_range.start);
+                            let col = line[..line_local_byte.min(line.len())].chars().count();
+                            let cx = body_resp.rect.left() + col as f32 * char_width;
+                            let cursor_bar = egui::Rect::from_min_max(
+                                egui::pos2(cx, body_resp.rect.top()),
+                                egui::pos2(cx + 2.0, body_resp.rect.bottom()),
+                            );
+                            ui.painter().rect_filled(cursor_bar, 0.0, cursor_color);
+                        }
                     }
                 }
 

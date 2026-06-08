@@ -267,8 +267,11 @@ impl VimEngine {
                 'x' => self.delete_char(),
                 'u' => self.undo(),
                 'i' => self.enter_insert_at_cursor(),
+                'I' => self.enter_insert_line_start(),
                 'a' => self.enter_insert_after_cursor(),
+                'A' => self.enter_insert_line_end(),
                 'o' => self.open_line_below(),
+                'O' => self.open_line_above(),
                 'v' => self.enter_visual(),
                 '/' => self.start_search_prompt(),
                 'n' => self.next_match(),
@@ -743,6 +746,33 @@ impl VimEngine {
             mode_changed: true,
             cursor_moved: true,
         }
+    }
+
+    fn open_line_above(&mut self) -> Action {
+        self.snapshot_for_undo();
+        let (start, _) = line_bounds(&self.buffer, self.cursor);
+        self.buffer.insert(start, '\n');
+        self.cursor = start;
+        self.mode = Mode::Insert;
+        Action {
+            buffer_changed: true,
+            mode_changed: true,
+            cursor_moved: true,
+        }
+    }
+
+    fn enter_insert_line_start(&mut self) -> Action {
+        let (start, _) = line_bounds(&self.buffer, self.cursor);
+        self.cursor = start;
+        self.mode = Mode::Insert;
+        Action::mode_changed()
+    }
+
+    fn enter_insert_line_end(&mut self) -> Action {
+        let (_, end) = line_bounds(&self.buffer, self.cursor);
+        self.cursor = end;
+        self.mode = Mode::Insert;
+        Action::mode_changed()
     }
 
     // ------------------------------------------------------------------

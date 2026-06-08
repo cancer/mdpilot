@@ -680,25 +680,31 @@ impl App {
         pressed
     }
 
-    /// Phase 10.3: `Cmd+J` sends keyboard focus to the chat prompt.
-    /// `feed_vim_events` already suppresses vim-engine dispatch while
-    /// the chat input owns focus, so flipping focus is enough.
-    fn consume_focus_chat_shortcut(&mut self, ctx: &egui::Context) -> bool {
+    /// Phase 10.3 (revised by user feedback): `Cmd+J` sends focus
+    /// to the **preview** (= drop chat focus, drop tree focus). The
+    /// previous direction (J → chat, K → preview) was reported as
+    /// the opposite of intuition; both keys now also clear tree
+    /// focus so toggling away from chat actually lands on the
+    /// preview's vim engine instead of the file tree.
+    fn consume_focus_preview_shortcut(&mut self, ctx: &egui::Context) -> bool {
         let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::J);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
-            ctx.memory_mut(|m| m.request_focus(crate::chat::view::chat_input_id()));
+            ctx.memory_mut(|m| m.surrender_focus(crate::chat::view::chat_input_id()));
+            self.file_tree_state.focused = false;
         }
         pressed
     }
 
-    /// Phase 10.3: `Cmd+K` releases focus from the chat prompt so
-    /// subsequent keys flow into the preview's vim engine.
-    fn consume_focus_preview_shortcut(&mut self, ctx: &egui::Context) -> bool {
+    /// Phase 10.3 (revised): `Cmd+K` sends focus to the **chat**
+    /// prompt and drops tree focus so the chat input actually
+    /// receives keys.
+    fn consume_focus_chat_shortcut(&mut self, ctx: &egui::Context) -> bool {
         let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
-            ctx.memory_mut(|m| m.surrender_focus(crate::chat::view::chat_input_id()));
+            ctx.memory_mut(|m| m.request_focus(crate::chat::view::chat_input_id()));
+            self.file_tree_state.focused = false;
         }
         pressed
     }
