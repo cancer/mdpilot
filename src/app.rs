@@ -666,6 +666,29 @@ impl App {
         pressed
     }
 
+    /// Phase 10.3: `Cmd+J` sends keyboard focus to the chat prompt.
+    /// `feed_vim_events` already suppresses vim-engine dispatch while
+    /// the chat input owns focus, so flipping focus is enough.
+    fn consume_focus_chat_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::J);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if pressed {
+            ctx.memory_mut(|m| m.request_focus(crate::chat::view::chat_input_id()));
+        }
+        pressed
+    }
+
+    /// Phase 10.3: `Cmd+K` releases focus from the chat prompt so
+    /// subsequent keys flow into the preview's vim engine.
+    fn consume_focus_preview_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if pressed {
+            ctx.memory_mut(|m| m.surrender_focus(crate::chat::view::chat_input_id()));
+        }
+        pressed
+    }
+
     /// Phase 10.2: drain pending input events into the active tab's
     /// vim engine. We only do this when the chat prompt doesn't own
     /// focus (otherwise the user's typing into the chat would also
@@ -1101,6 +1124,8 @@ impl eframe::App for App {
         self.consume_close_tab_shortcut(ctx);
         self.consume_tab_switch_shortcuts(ctx);
         self.consume_tree_toggle_shortcut(ctx);
+        self.consume_focus_chat_shortcut(ctx);
+        self.consume_focus_preview_shortcut(ctx);
         // Phase 10.2: route keyboard input into the active tab's
         // vim engine when the chat input doesn't own focus.
         self.feed_vim_events(ctx);
