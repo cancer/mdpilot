@@ -23,6 +23,26 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 use crate::preview::loader::{LoadError, LoadedDocument, SizeClass, SOFT_LIMIT_BYTES};
+use crate::vim::{Mode as VimMode, VimEngine};
+
+/// Phase 10.2: editor state attached to every `Loaded` document.
+/// Holds the vim engine that drives modal editing of `buffer()`.
+#[derive(Debug)]
+pub struct EditorState {
+    pub vim: VimEngine,
+}
+
+impl EditorState {
+    pub fn from_document(doc: &LoadedDocument) -> Self {
+        Self {
+            vim: VimEngine::new(doc.text.clone()),
+        }
+    }
+
+    pub fn mode(&self) -> VimMode {
+        self.vim.mode()
+    }
+}
 
 /// Theme name used in dark mode. Bundled by `default-themes`.
 const SYNTAX_THEME_DARK: &str = "base16-ocean.dark";
@@ -48,13 +68,15 @@ impl Default for PreviewState {
 
 impl PreviewState {
     pub fn loaded(document: LoadedDocument) -> Self {
+        let editor = EditorState::from_document(&document);
         Self {
-            status: PreviewStatus::Loaded { document },
+            status: PreviewStatus::Loaded { document, editor },
         }
     }
 
     pub fn set_document(&mut self, document: LoadedDocument) {
-        self.status = PreviewStatus::Loaded { document };
+        let editor = EditorState::from_document(&document);
+        self.status = PreviewStatus::Loaded { document, editor };
     }
 
     pub fn set_error(&mut self, path_label: String, error: LoadError) {
@@ -64,6 +86,14 @@ impl PreviewState {
     pub fn clear(&mut self) {
         self.status = PreviewStatus::Empty;
     }
+
+    /// Convenience: current active vim mode (if a document is loaded).
+    pub fn vim_mode(&self) -> Option<VimMode> {
+        match &self.status {
+            PreviewStatus::Loaded { editor, .. } => Some(editor.mode()),
+            _ => None,
+        }
+    }
 }
 
 /// Three-way state of the preview pane.
@@ -72,6 +102,7 @@ pub enum PreviewStatus {
     Empty,
     Loaded {
         document: LoadedDocument,
+        editor: EditorState,
     },
     Failed {
         path_label: String,
@@ -92,7 +123,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut PreviewState) {
         PreviewStatus::Failed { path_label, error } => {
             show_error(ui, path_label, error);
         }
-        PreviewStatus::Loaded { document } => {
+        PreviewStatus::Loaded { document, editor } => {
             if document.size_class == SizeClass::Large {
                 ui.add(
                     egui::Label::new(
@@ -109,10 +140,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut PreviewState) {
             } else {
                 SYNTAX_THEME_LIGHT
             };
+            // Source-of-truth for the text is the vim engine buffer.
+            // The LoadedDocument.text stays untouched as the
+            // "originally loaded from disk" reference; keystroke save
+            // (Phase 10.4) will sync them.
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    show_source_grid(ui, &document.text, theme_name);
+                    show_source_grid(ui, editor.vim.buffer(), theme_name, Some(editor));
                 });
         }
     }
@@ -217,7 +252,12 @@ fn theme_for(name: &str) -> &'static Theme {
 /// Using `Grid` lets each row's height be set by the body's wrapped
 /// height while the gutter cell stays at its natural single-row
 /// height (top-aligned).
-fn show_source_grid(ui: &mut egui::Ui, source: &str, theme_name: &str) {
+fn show_source_grid(
+    ui: &mut egui::Ui,
+    source: &str,
+    theme_name: &str,
+    editor: Option<&EditorState>,
+) {
     let syntax = markdown_syntax();
     let theme = theme_for(theme_name);
     let mut highlighter = HighlightLines::new(syntax, theme);
@@ -233,12 +273,15 @@ fn show_source_grid(ui: &mut egui::Ui, source: &str, theme_name: &str) {
         egui::Color32::from_gray(40)
     };
 
-    // Separator color: same gray family as the line numbers but
-    // a touch dimmer so it reads as decoration, not text.
     let separator_color = egui::Color32::from_gray(60);
     let separator_stroke = egui::Stroke::new(1.0, separator_color);
     let row_spacing_y: f32 = 0.0;
     let separator_pad: f32 = 6.0;
+
+    // Pre-compute the source line that holds the cursor (and where
+    // within that line, byte-wise) so we can paint a cursor marker
+    // on the matching row below.
+    let cursor_line = editor.map(|ed| line_index_of(source, ed.vim.cursor()));
 
     egui::Grid::new("preview_source_grid")
         .num_columns(2)
@@ -257,26 +300,14 @@ fn show_source_grid(ui: &mut egui::Ui, source: &str, theme_name: &str) {
                     .selectable(false),
                 );
 
-                // Draw the gutter↔body separator as a single line
-                // segment per row. Using `Painter::line_segment`
-                // (instead of putting `│` inside the gutter text)
-                // lets the line span the full row height — the box-
-                // drawing glyph only covers the font's x-height-ish
-                // band, which leaves visible gaps between rows.
                 let sep_x = gutter_resp.rect.right() + separator_pad;
                 let sep_top = gutter_resp.rect.top();
-                // Extend by half of the row spacing so adjacent
-                // rows' segments meet exactly. When row_spacing_y
-                // is 0 this is a no-op.
                 let sep_bottom = gutter_resp.rect.bottom() + row_spacing_y;
                 ui.painter().line_segment(
                     [egui::pos2(sep_x, sep_top), egui::pos2(sep_x, sep_bottom)],
                     separator_stroke,
                 );
 
-                // Body for this source line. Drop the trailing '\n'
-                // since each row is its own widget; the row break
-                // happens via `ui.end_row()`.
                 let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
                 let mut body_job = egui::text::LayoutJob::default();
                 match highlighter.highlight_line(raw_line, set) {
@@ -294,15 +325,46 @@ fn show_source_grid(ui: &mut egui::Ui, source: &str, theme_name: &str) {
                         append(&mut body_job, line, fallback_body_color, FontStyle::empty());
                     }
                 }
-                // Empty bodies still need a placeholder so the row
-                // has the same baseline height as a non-empty one.
                 if body_job.sections.is_empty() {
                     append(&mut body_job, " ", fallback_body_color, FontStyle::empty());
                 }
-                ui.add(egui::Label::new(body_job).selectable(true).wrap());
+                let body_resp = ui.add(egui::Label::new(body_job).selectable(true).wrap());
+
+                // Cursor marker. Phase 10.2 minimum: highlight the
+                // entire row containing the cursor with a subtle
+                // background bar on the gutter, plus a tinted left
+                // edge on the body. A proper char-precise cursor
+                // needs the body's Galley which Label doesn't expose;
+                // 10.3 / 10.4 will refine this.
+                if Some(idx) == cursor_line {
+                    if let Some(ed) = editor {
+                        let cursor_color = match ed.mode() {
+                            VimMode::Normal => egui::Color32::from_rgb(80, 160, 220),
+                            VimMode::Insert => egui::Color32::from_rgb(80, 200, 100),
+                            VimMode::Visual => egui::Color32::from_rgb(220, 180, 70),
+                        };
+                        let bar_rect = egui::Rect::from_min_max(
+                            egui::pos2(gutter_resp.rect.left() - 3.0, gutter_resp.rect.top()),
+                            egui::pos2(gutter_resp.rect.left() - 1.0, gutter_resp.rect.bottom()),
+                        );
+                        ui.painter().rect_filled(bar_rect, 0.0, cursor_color);
+                        let row_tint = cursor_color.linear_multiply(0.08);
+                        ui.painter().rect_filled(body_resp.rect, 0.0, row_tint);
+                    }
+                }
+
                 ui.end_row();
             }
         });
+}
+
+/// Return the line index (0-based) containing byte offset `pos`.
+/// `pos == source.len()` belongs to the last line.
+fn line_index_of(source: &str, pos: usize) -> usize {
+    source[..pos.min(source.len())]
+        .bytes()
+        .filter(|b| *b == b'\n')
+        .count()
 }
 
 /// Render the gutter cell for `line_no`. Right-aligned in a field
@@ -440,7 +502,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                show_source_grid(ui, "# Title\n\nbody\n", SYNTAX_THEME_DARK);
+                show_source_grid(ui, "# Title\n\nbody\n", SYNTAX_THEME_DARK, None);
             });
         });
     }
@@ -450,7 +512,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                show_source_grid(ui, "", SYNTAX_THEME_DARK);
+                show_source_grid(ui, "", SYNTAX_THEME_DARK, None);
             });
         });
     }
@@ -460,7 +522,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                show_source_grid(ui, "hello\n", SYNTAX_THEME_LIGHT);
+                show_source_grid(ui, "hello\n", SYNTAX_THEME_LIGHT, None);
             });
         });
     }

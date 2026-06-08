@@ -1,9 +1,10 @@
-// Phase 10.1: engine is in place but not wired into the preview yet;
-// Phase 10.2 will use these symbols. Until then dead-code lint would
-// fire on every helper. Re-tighten in 10.2 after the preview adopts it.
+// Phase 10.2 wires the engine into the preview, but several helpers
+// (visual selection range queries, search infrastructure, char-class
+// API) are still only used by tests and future sub-phases. Keep the
+// allow narrow rather than per-symbol for now; trim in 10.4/10.6.
 #![allow(dead_code)]
 
-//! Phase 10.1: vim-style modal editing engine for the preview editor.
+//! vim-style modal editing engine for the preview editor.
 //!
 //! Pure state machine — egui-free — so the host (preview pane in Phase 10.2)
 //! can feed it `VimEvent`s and read back the buffer / cursor / mode each

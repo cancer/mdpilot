@@ -666,6 +666,31 @@ impl App {
         pressed
     }
 
+    /// Phase 10.2: drain pending input events into the active tab's
+    /// vim engine. We only do this when the chat prompt doesn't own
+    /// focus (otherwise the user's typing into the chat would also
+    /// drive the editor, which is wrong). Phase 10.3 will replace
+    /// this focus check with an explicit pane-focus flag.
+    fn feed_vim_events(&mut self, ctx: &egui::Context) {
+        let chat_focused =
+            ctx.memory(|mem| mem.focused() == Some(crate::chat::view::chat_input_id()));
+        if chat_focused {
+            return;
+        }
+        let tab = &mut self.tabs[self.active_tab];
+        let editor = match &mut tab.preview.status {
+            PreviewStatus::Loaded { editor, .. } => editor,
+            _ => return,
+        };
+        let events: Vec<egui::Event> = ctx.input(|i| i.events.to_vec());
+        for event in events {
+            let Some(vim_event) = translate_event(&event, editor.mode()) else {
+                continue;
+            };
+            editor.vim.apply(vim_event);
+        }
+    }
+
     /// `docs/ui.md` §6.2: `Cmd+\` / `Ctrl+\` resets the pane split
     /// to 50/50. This is app-wide (not per-tab) because the pane
     /// layout itself is shared across tabs.
@@ -894,6 +919,59 @@ impl App {
 /// Phase 9.X.6: record `project_root` as the last-used project in
 /// `sessions.json`. Best-effort: the store may be unavailable (no
 /// home dir) or write may fail; both are warned and ignored.
+/// Phase 10.2: convert an `egui::Event` into a `vim::VimEvent`.
+/// Returns `None` for events that aren't input keys (mouse moves,
+/// focus changes, etc.) or for commands the engine doesn't accept
+/// (modified keys such as Cmd+Q stay with the egui shortcut layer).
+fn translate_event(event: &egui::Event, mode: crate::vim::Mode) -> Option<crate::vim::VimEvent> {
+    use crate::vim::VimEvent;
+    match event {
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => {
+            // Cmd+R / Ctrl+R is the explicit redo binding. Bare R
+            // would land as a Char in Insert mode, which we don't
+            // want to confuse with redo.
+            if modifiers.command && *key == egui::Key::R {
+                return Some(VimEvent::CtrlR);
+            }
+            if modifiers.any() {
+                // Other modified keys (Cmd+S, Cmd+O, …) are owned by
+                // the app-level shortcut consumers; don't double-deliver.
+                return None;
+            }
+            match key {
+                egui::Key::Escape => Some(VimEvent::Escape),
+                egui::Key::Enter => Some(VimEvent::Enter),
+                egui::Key::Backspace => Some(VimEvent::Backspace),
+                // Normal-mode single-letter commands (h/j/k/l, i, ...)
+                // come via Event::Text below; we don't translate
+                // letter keys here so we don't double-fire.
+                _ => None,
+            }
+        }
+        egui::Event::Text(text) => {
+            // In Insert mode every char in the IME-final text should
+            // be inserted. In Normal/Visual we feed each char one at
+            // a time so commands like "dd" / "yy" / "gg" parse.
+            let _ = mode;
+            // Returning a single-char VimEvent is enough; the caller
+            // loops over the entire Vec<Event> so multi-char Text
+            // gets handled by emitting one VimEvent per char on
+            // separate `Event::Text` entries. egui emits one Text
+            // event per character on macOS/Windows after the IME, so
+            // multi-char Text is rare. To be safe, only take the
+            // first char here; subsequent chars will surface as
+            // additional Event::Text frames.
+            text.chars().next().map(VimEvent::Char)
+        }
+        _ => None,
+    }
+}
+
 fn persist_last_project(store_path: Option<&Path>, project_root: &Path) {
     let Some(path) = store_path else {
         return;
@@ -1023,6 +1101,9 @@ impl eframe::App for App {
         self.consume_close_tab_shortcut(ctx);
         self.consume_tab_switch_shortcuts(ctx);
         self.consume_tree_toggle_shortcut(ctx);
+        // Phase 10.2: route keyboard input into the active tab's
+        // vim engine when the chat input doesn't own focus.
+        self.feed_vim_events(ctx);
         self.maybe_persist_active_session();
         self.maybe_persist_session_previews();
         self.update_window_title(ctx);
@@ -1308,14 +1389,14 @@ mod tests {
     use std::path::PathBuf;
 
     fn loaded(path: &str) -> PreviewStatus {
-        PreviewStatus::Loaded {
-            document: LoadedDocument {
-                path: PathBuf::from(path),
-                text: String::new(),
-                size_bytes: 0,
-                size_class: SizeClass::Small,
-            },
-        }
+        let document = LoadedDocument {
+            path: PathBuf::from(path),
+            text: String::new(),
+            size_bytes: 0,
+            size_class: SizeClass::Small,
+        };
+        let editor = crate::preview::render::EditorState::from_document(&document);
+        PreviewStatus::Loaded { document, editor }
     }
 
     #[test]

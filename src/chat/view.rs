@@ -2,6 +2,13 @@ use eframe::egui;
 
 use crate::chat::history::{ChatHistory, ChatMessage, SystemMessage, ToolBlock};
 
+/// Stable id for the chat prompt `TextEdit`. The `App` reads this id
+/// in Phase 10.2 to suppress vim-engine event dispatch while the
+/// user is typing in the chat input.
+pub fn chat_input_id() -> egui::Id {
+    egui::Id::new("chat_prompt_input")
+}
+
 /// Render the chat pane: message history scroll area on top, prompt input
 /// and Send/Cancel buttons at the bottom.
 ///
@@ -70,6 +77,7 @@ fn input_row(
         let editor = ui.add_sized(
             [input_width, 60.0],
             egui::TextEdit::multiline(&mut history.input)
+                .id(chat_input_id())
                 .desired_rows(2)
                 .hint_text("プロンプトを入力… (Enter で送信、Shift+Enter で改行)"),
         );
