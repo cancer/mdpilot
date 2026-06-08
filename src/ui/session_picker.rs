@@ -45,7 +45,14 @@ pub fn show(
                 ui.separator();
             }
             if sessions.is_empty() {
-                ui.label("このプロジェクトでの過去セッションは見つかりませんでした。");
+                // Phase 9.X.3: 履歴ピッカーは mdpilot が preview を
+                // 記録した session に限定しているため、claude
+                // 自体には履歴があっても 0 件になる場合がある
+                // (旧ビルドで作られた session など)。
+                ui.label(
+                    "復元可能なセッションは見つかりませんでした。\
+                     一度起動して .md を開いたセッションが対象です。",
+                );
                 return;
             }
             egui::ScrollArea::vertical().show(ui, |ui| {
