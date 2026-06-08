@@ -88,6 +88,12 @@ pub struct Tab {
     pub pending_follow: Option<(PathBuf, Instant)>,
     pub auto_follow_enabled: bool,
     pub watcher_error: Option<String>,
+
+    /// Phase 10.4: hash of the bytes we most recently wrote to disk
+    /// for the loaded document. Reload events whose disk hash matches
+    /// this are our own keystroke-save echoes and get dropped. `None`
+    /// before any save has happened or while no document is loaded.
+    pub last_written_hash: Option<u64>,
 }
 
 /// Optional handle for resuming an existing claude session.
@@ -147,6 +153,11 @@ impl Tab {
             }
         };
 
+        let initial_hash = if let PreviewStatus::Loaded { document, .. } = &initial_preview.status {
+            Some(content_hash(document.text.as_bytes()))
+        } else {
+            None
+        };
         let mut tab = Self {
             id,
             label,
@@ -163,9 +174,50 @@ impl Tab {
             pending_follow: None,
             auto_follow_enabled: true,
             watcher_error,
+            last_written_hash: initial_hash,
         };
         tab.sync_watch_target();
         tab
+    }
+
+    /// Phase 10.4: write the current vim buffer to disk and update
+    /// `last_written_hash` so the watcher echo gets dropped. Pure
+    /// best-effort — IO errors are logged, not surfaced to the user
+    /// (yet; Phase 10.5 wires the conflict banner).
+    pub fn save_current_buffer(&mut self) {
+        let (path, bytes) = match &self.preview.status {
+            PreviewStatus::Loaded { document, editor } => (
+                document.path.clone(),
+                editor.vim.buffer().as_bytes().to_vec(),
+            ),
+            _ => return,
+        };
+        match std::fs::write(&path, &bytes) {
+            Ok(()) => {
+                self.last_written_hash = Some(content_hash(&bytes));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "keystroke save failed",
+                );
+            }
+        }
+    }
+
+    /// Phase 10.4: returns `true` when the current disk hash equals
+    /// what we last wrote — i.e. the just-fired watcher event is our
+    /// own echo. Reads the file to compare; failure to read drops to
+    /// `false` so we fall through to a normal reload attempt.
+    fn is_self_echo(&self, path: &Path) -> bool {
+        let Some(expected) = self.last_written_hash else {
+            return false;
+        };
+        match std::fs::read(path) {
+            Ok(bytes) => content_hash(&bytes) == expected,
+            Err(_) => false,
+        }
     }
 
     /// Path the preview is currently looking at (`Loaded`), or
@@ -249,6 +301,16 @@ impl Tab {
                 FileWatchEvent::Changed { path } => {
                     if let Some(current) = current_path.as_deref() {
                         if watcher::paths_match(&path, current) {
+                            // Phase 10.4 echo check: read the disk
+                            // copy and compare against our last-written
+                            // hash. If they match, this watcher event
+                            // is the kernel echoing our own keystroke
+                            // save and we must drop it; otherwise the
+                            // file was changed externally (Claude or
+                            // another tool) and we schedule reload.
+                            if self.is_self_echo(current) {
+                                continue;
+                            }
                             self.pending_reload = Some(Instant::now() + RELOAD_DEBOUNCE);
                             ctx.request_repaint_after(RELOAD_DEBOUNCE);
                         }
@@ -318,6 +380,7 @@ impl Tab {
                 let label = path.to_string_lossy().into_owned();
                 match loader::load_markdown(&path) {
                     Ok(document) => {
+                        self.last_written_hash = Some(content_hash(document.text.as_bytes()));
                         self.preview.set_document(document);
                         self.watcher_error = None;
                         self.pending_reload = None;
@@ -330,6 +393,7 @@ impl Tab {
                             "auto-follow target failed to load",
                         );
                         self.preview.set_error(label, error);
+                        self.last_written_hash = None;
                     }
                 }
             }
@@ -350,6 +414,7 @@ impl Tab {
         };
         match loader::load_markdown(&path) {
             Ok(document) => {
+                self.last_written_hash = Some(content_hash(document.text.as_bytes()));
                 self.preview.set_document(document);
                 self.watcher_error = None;
                 self.sync_watch_target();
@@ -395,6 +460,16 @@ impl Tab {
             }
         }
     }
+}
+
+/// Phase 10.4: stable, fast hash of the buffer bytes used to
+/// distinguish "our own write" from external write events. 64-bit
+/// `DefaultHasher` is more than enough at keystroke frequency.
+pub(crate) fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
 }
 
 fn spawn_session(

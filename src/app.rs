@@ -700,17 +700,34 @@ impl App {
         if chat_focused {
             return;
         }
-        let tab = &mut self.tabs[self.active_tab];
-        let editor = match &mut tab.preview.status {
-            PreviewStatus::Loaded { editor, .. } => editor,
-            _ => return,
-        };
         let events: Vec<egui::Event> = ctx.input(|i| i.events.to_vec());
+        if events.is_empty() {
+            return;
+        }
+        let tab = &mut self.tabs[self.active_tab];
+        let mut any_buffer_change = false;
         for event in events {
-            let Some(vim_event) = translate_event(&event, editor.mode()) else {
+            let mode = match &tab.preview.status {
+                PreviewStatus::Loaded { editor, .. } => editor.mode(),
+                _ => return,
+            };
+            let Some(vim_event) = translate_event(&event, mode) else {
                 continue;
             };
-            editor.vim.apply(vim_event);
+            let editor = match &mut tab.preview.status {
+                PreviewStatus::Loaded { editor, .. } => editor,
+                _ => return,
+            };
+            let action = editor.vim.apply(vim_event);
+            if action.buffer_changed {
+                any_buffer_change = true;
+            }
+        }
+        if any_buffer_change {
+            // Phase 10.4: keystroke save. Frequency is bounded by the
+            // egui event loop, so bursty typing still only writes
+            // O(frames) times per second.
+            tab.save_current_buffer();
         }
     }
 
