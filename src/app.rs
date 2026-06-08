@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
@@ -94,6 +94,13 @@ pub struct App {
     /// the next launch would try to resume a ghost session.
     session_persisted_this_run: bool,
 
+    /// Phase 9.X.3: last preview path we wrote to `sessions.json`
+    /// for each session-id. Used to detect changes and avoid
+    /// writing the store every frame. `None` means "we persisted
+    /// an empty preview for that session"; `Some(path)` mirrors the
+    /// last-saved markdown source path.
+    previews_persisted: std::collections::HashMap<Uuid, Option<PathBuf>>,
+
     /// Phase 9.X.2: state for the resume-picker modal. `None`
     /// when the modal is closed; `Some(_)` while it's open with
     /// a pre-loaded session list. The list is captured on open
@@ -145,31 +152,40 @@ impl App {
             };
 
         let session_store_path = AppPaths::resolve().map(|p| p.data_dir.join("sessions.json"));
-        let resume = session_store_path.as_ref().and_then(|path| {
-            let store = SessionStore::load_or_default(path);
-            let entry = store.get(&project.root)?;
-            match Uuid::parse_str(&entry.session_id) {
-                Ok(uuid) => {
-                    tracing::info!(
-                        session_id = %uuid,
-                        project = %project.root.display(),
-                        "resuming previous claude session (F-11)",
-                    );
-                    Some(ResumeSession { session_id: uuid })
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        stored = %entry.session_id,
-                        error = %err,
-                        "stored session id is not a valid UUID; starting fresh",
-                    );
-                    None
-                }
-            }
-        });
+        // Read the store once to extract both the resume target and
+        // (if found) that session's last preview path.
+        let (resume, resume_preview_path) = session_store_path
+            .as_ref()
+            .map(|path| {
+                let store = SessionStore::load_or_default(path);
+                let Some(entry) = store.get(&project.root) else {
+                    return (None, None);
+                };
+                let uuid = match Uuid::parse_str(&entry.session_id) {
+                    Ok(uuid) => uuid,
+                    Err(err) => {
+                        tracing::warn!(
+                            stored = %entry.session_id,
+                            error = %err,
+                            "stored session id is not a valid UUID; starting fresh",
+                        );
+                        return (None, None);
+                    }
+                };
+                tracing::info!(
+                    session_id = %uuid,
+                    project = %project.root.display(),
+                    "resuming previous claude session (F-11)",
+                );
+                let preview_path = store
+                    .get_preview(&entry.session_id)
+                    .map(|p| p.to_path_buf());
+                (Some(ResumeSession { session_id: uuid }), preview_path)
+            })
+            .unwrap_or((None, None));
 
         let mut tab_id_gen = TabIdGen::default();
-        let initial_preview = initial_preview_state(&project);
+        let initial_preview = initial_preview_state(&project, resume_preview_path.as_deref());
         let mut initial_tab = Tab::new(
             &cc.egui_ctx,
             &project.root,
@@ -204,6 +220,7 @@ impl App {
             chat_quote_bubble_rect: None,
             session_store_path,
             session_persisted_this_run: false,
+            previews_persisted: std::collections::HashMap::new(),
             session_picker: None,
         }
     }
@@ -243,14 +260,39 @@ impl App {
     /// future shortcut that resumes by id.
     fn open_tab_resuming(&mut self, session_id: Uuid) {
         let id = self.tab_id_gen.next();
-        // Truncate id for the label so the tab bar stays compact.
-        // `Tab::session_id` keeps the full id for the spawn.
         let short: String = session_id.to_string().chars().take(8).collect();
         let label = format!("再開 {short}");
+        // Phase 9.X.3: restore whichever preview file was open when
+        // mdpilot last persisted this session. The picker isn't
+        // useful if the chat resumes but the document context is
+        // lost. Falls back to empty when no preview was recorded.
+        let initial_preview = self
+            .session_store_path
+            .as_ref()
+            .and_then(|path| {
+                let store = SessionStore::load_or_default(path);
+                store
+                    .get_preview(&session_id.to_string())
+                    .map(|p| p.to_path_buf())
+            })
+            .map(|path| match loader::load_markdown(&path) {
+                Ok(document) => PreviewState::loaded(document),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        ?error,
+                        "failed to load resumed session's preview target",
+                    );
+                    let mut state = PreviewState::default();
+                    state.set_error(path.to_string_lossy().into_owned(), error);
+                    state
+                }
+            })
+            .unwrap_or_default();
         let tab = Tab::new(
             &self.ctx,
             &self.project_root,
-            PreviewState::default(),
+            initial_preview,
             id,
             label,
             Some(ResumeSession { session_id }),
@@ -307,6 +349,49 @@ impl App {
             "persisted session-id (F-11)",
         );
         self.session_persisted_this_run = true;
+    }
+
+    /// Phase 9.X.3: write every confirmed tab's current preview
+    /// path into the session store. Skips no-op writes by comparing
+    /// against `previews_persisted` so the typical "preview didn't
+    /// change" frame costs zero IO.
+    fn maybe_persist_session_previews(&mut self) {
+        let Some(path) = self.session_store_path.as_ref() else {
+            return;
+        };
+        // Snapshot what we want to write without holding a borrow
+        // into `self.tabs`, so the subsequent `previews_persisted`
+        // update doesn't conflict with the borrow checker.
+        let mut to_write: Vec<(Uuid, Option<PathBuf>)> = Vec::new();
+        for tab in &self.tabs {
+            if !tab.session_confirmed {
+                continue;
+            }
+            let current = tab.current_preview_path().map(|p| p.to_path_buf());
+            let cached = self.previews_persisted.get(&tab.session_id);
+            if cached != Some(&current) {
+                to_write.push((tab.session_id, current));
+            }
+        }
+        if to_write.is_empty() {
+            return;
+        }
+        let mut store = SessionStore::load_or_default(path);
+        for (session_id, preview_path) in &to_write {
+            store.set_preview(&session_id.to_string(), preview_path.as_deref());
+        }
+        if let Err(err) = store.save_atomic(path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to save session preview paths",
+            );
+            // Don't update cache — retry next frame.
+            return;
+        }
+        for (session_id, preview_path) in to_write {
+            self.previews_persisted.insert(session_id, preview_path);
+        }
     }
 
     /// Create a fresh tab with an empty preview and append it to
@@ -662,8 +747,14 @@ impl App {
     }
 }
 
-fn initial_preview_state(project: &ProjectInit) -> PreviewState {
-    let Some(path) = project::initial_preview(project) else {
+fn initial_preview_state(project: &ProjectInit, resume_preview: Option<&Path>) -> PreviewState {
+    // Priority: explicit positional arg → resume's last preview →
+    // project README → empty. The resume-preview path slots in
+    // *after* the explicit arg so `mdpilot foo.md` always wins over
+    // whatever the previous session was looking at.
+    let path =
+        project::initial_preview(project).or_else(|| resume_preview.map(|p| p.to_path_buf()));
+    let Some(path) = path else {
         return PreviewState::default();
     };
     match loader::load_markdown(&path) {
@@ -739,6 +830,7 @@ impl eframe::App for App {
         self.consume_close_tab_shortcut(ctx);
         self.consume_tab_switch_shortcuts(ctx);
         self.maybe_persist_active_session();
+        self.maybe_persist_session_previews();
         self.update_window_title(ctx);
     }
 

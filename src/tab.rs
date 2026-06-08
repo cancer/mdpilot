@@ -168,6 +168,18 @@ impl Tab {
         tab
     }
 
+    /// Path the preview is currently looking at (`Loaded`), or
+    /// `None` when the preview is `Empty` or `Failed`. Used by
+    /// the App to persist "session → last preview" across runs
+    /// (Phase 9.X.3).
+    pub fn current_preview_path(&self) -> Option<&Path> {
+        if let PreviewStatus::Loaded { document, .. } = &self.preview.status {
+            Some(document.path.as_path())
+        } else {
+            None
+        }
+    }
+
     /// Adjust the file-watcher subscription so it tracks exactly the
     /// path that `preview` currently displays. Called whenever the
     /// preview target changes within this tab.

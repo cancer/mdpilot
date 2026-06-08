@@ -23,6 +23,17 @@ pub struct SessionStore {
     pub version: u32,
     #[serde(default)]
     pub entries: BTreeMap<String, SessionEntry>,
+    /// Per-session "last preview file" so that resuming a session
+    /// (F-11 auto-resume or the history picker in Phase 9.19) also
+    /// reopens whichever markdown source the user was looking at.
+    /// Keyed by session-id (UUID string) — independent of `entries`
+    /// so the history picker can resume sessions that are no longer
+    /// the project's "current" one.
+    ///
+    /// `#[serde(default)]` keeps old `sessions.json` files (written
+    /// before this field existed) loading cleanly.
+    #[serde(default)]
+    pub session_previews: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -37,6 +48,7 @@ impl Default for SessionStore {
         Self {
             version: STORE_VERSION,
             entries: BTreeMap::new(),
+            session_previews: BTreeMap::new(),
         }
     }
 }
@@ -108,6 +120,28 @@ impl SessionStore {
             },
         );
         self.entries.get(&key).expect("just inserted")
+    }
+
+    /// Remember the markdown preview path the user had open when
+    /// they were last in `session_id`. Pass `None` to forget (e.g.
+    /// preview was cleared back to `Empty`).
+    pub fn set_preview(&mut self, session_id: &str, path: Option<&Path>) {
+        match path {
+            Some(p) => {
+                self.session_previews
+                    .insert(session_id.to_string(), p.to_path_buf());
+            }
+            None => {
+                self.session_previews.remove(session_id);
+            }
+        }
+    }
+
+    /// Look up the last preview path persisted for `session_id`.
+    /// Returns `None` when the session was never persisted with a
+    /// non-empty preview, or when the store predates this field.
+    pub fn get_preview(&self, session_id: &str) -> Option<&Path> {
+        self.session_previews.get(session_id).map(|p| p.as_path())
     }
 }
 
@@ -225,5 +259,47 @@ mod tests {
         SessionStore::default().save_atomic(&path).unwrap();
         let tmp = temp_path_for(&path);
         assert!(!tmp.exists(), "tmp file should be renamed away");
+    }
+
+    #[test]
+    fn set_preview_round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        let mut store = SessionStore::default();
+        store.set_preview("abc-123", Some(Path::new("/proj/docs/intro.md")));
+        store.save_atomic(&path).unwrap();
+        let loaded = SessionStore::load_or_default(&path);
+        assert_eq!(
+            loaded.get_preview("abc-123"),
+            Some(Path::new("/proj/docs/intro.md")),
+        );
+        assert_eq!(loaded.get_preview("missing"), None);
+    }
+
+    #[test]
+    fn set_preview_with_none_removes_the_entry() {
+        let mut store = SessionStore::default();
+        store.set_preview("sid", Some(Path::new("/a.md")));
+        assert!(store.get_preview("sid").is_some());
+        store.set_preview("sid", None);
+        assert!(store.get_preview("sid").is_none());
+    }
+
+    #[test]
+    fn load_old_sessions_json_without_previews_field() {
+        // Sessions written before Phase 9.X have no session_previews
+        // field. They must still deserialize cleanly so a user
+        // upgrading mdpilot doesn't lose their saved entries.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        fs::write(
+            &path,
+            r#"{"version": 1, "entries": {"/proj": {"session_id": "sid-1", "claude_version": "1.0.0", "last_used": "2026-06-01T12:00:00Z"}}}"#,
+        )
+        .unwrap();
+        let loaded = SessionStore::load_or_default(&path);
+        assert_eq!(loaded.version, 1);
+        assert!(loaded.entries.contains_key("/proj"));
+        assert!(loaded.session_previews.is_empty());
     }
 }
