@@ -101,6 +101,12 @@ pub struct Tab {
     /// "reload / keep / diff" banner; resolving either way clears
     /// this flag.
     pub conflict_detected: bool,
+
+    /// Phase 10.7: auto-follow target that fired while the user
+    /// was in Insert mode. Holds the path the watcher wanted to
+    /// switch to; the UI surfaces a "open / stay" banner so the
+    /// user's typing session isn't yanked away.
+    pub follow_prompt: Option<PathBuf>,
 }
 
 /// Optional handle for resuming an existing claude session.
@@ -183,6 +189,7 @@ impl Tab {
             watcher_error,
             last_written_hash: initial_hash,
             conflict_detected: false,
+            follow_prompt: None,
         };
         tab.sync_watch_target();
         tab
@@ -257,6 +264,40 @@ impl Tab {
     pub fn resolve_conflict_with_keep(&mut self) {
         self.conflict_detected = false;
         self.save_current_buffer();
+    }
+
+    /// Phase 10.7: user accepted the auto-follow prompt. Load the
+    /// queued path into the preview and clear the prompt.
+    pub fn accept_follow_prompt(&mut self) {
+        let Some(path) = self.follow_prompt.take() else {
+            return;
+        };
+        let label = path.to_string_lossy().into_owned();
+        match loader::load_markdown(&path) {
+            Ok(document) => {
+                self.last_written_hash = Some(content_hash(document.text.as_bytes()));
+                self.preview.set_document(document);
+                self.watcher_error = None;
+                self.pending_reload = None;
+                self.sync_watch_target();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %label,
+                    ?error,
+                    "follow-prompt target failed to load",
+                );
+                self.preview.set_error(label, error);
+                self.last_written_hash = None;
+            }
+        }
+    }
+
+    /// Phase 10.7: user dismissed the auto-follow prompt. Discard
+    /// the queued path; the watcher will surface another prompt on
+    /// the next external write.
+    pub fn dismiss_follow_prompt(&mut self) {
+        self.follow_prompt = None;
     }
 
     /// Path the preview is currently looking at (`Loaded`), or
@@ -417,7 +458,9 @@ impl Tab {
     }
 
     /// If the auto-follow debounce has elapsed, switch the preview
-    /// target to the queued path and rebind watchers.
+    /// target to the queued path and rebind watchers. Phase 10.7:
+    /// while the user is in Insert mode, defer the actual switch
+    /// and surface a "open / stay" banner instead.
     pub fn poll_pending_follow(&mut self, ctx: &egui::Context) {
         let deadline = self.pending_follow.as_ref().map(|(_, d)| *d);
         match watcher::reload_decision(deadline, Instant::now()) {
@@ -427,6 +470,14 @@ impl Tab {
                 let Some((path, _)) = self.pending_follow.take() else {
                     return;
                 };
+                if matches!(self.preview.vim_mode(), Some(crate::vim::Mode::Insert)) {
+                    tracing::info!(
+                        path = %path.display(),
+                        "auto-follow target queued while user editing; prompting",
+                    );
+                    self.follow_prompt = Some(path);
+                    return;
+                }
                 tracing::info!(
                     path = %path.display(),
                     "auto-follow switching preview target",

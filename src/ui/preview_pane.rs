@@ -16,6 +16,8 @@ pub struct PreviewPaneOutcome {
     pub open_file: Option<PathBuf>,
     /// Phase 10.5: user picked one of the conflict-banner buttons.
     pub conflict_action: ConflictAction,
+    /// Phase 10.7: user picked one of the follow-prompt buttons.
+    pub follow_action: FollowAction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +25,13 @@ pub enum ConflictAction {
     None,
     Reload,
     Keep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowAction {
+    None,
+    Accept,
+    Dismiss,
 }
 
 /// Phase 9.X.4 + 10.5: optional left sidebar with the project file
@@ -35,10 +44,12 @@ pub fn show(
     project_root: &Path,
     tree_open: bool,
     conflict_detected: bool,
+    follow_prompt: Option<&Path>,
 ) -> PreviewPaneOutcome {
     let mut outcome = PreviewPaneOutcome {
         open_file: None,
         conflict_action: ConflictAction::None,
+        follow_action: FollowAction::None,
     };
     if tree_open {
         ui.horizontal_top(|ui| {
@@ -53,6 +64,9 @@ pub fn show(
             );
             ui.separator();
             ui.vertical(|ui| {
+                if let Some(path) = follow_prompt {
+                    outcome.follow_action = show_follow_banner(ui, path);
+                }
                 if conflict_detected {
                     outcome.conflict_action = show_conflict_banner(ui);
                 }
@@ -60,12 +74,52 @@ pub fn show(
             });
         });
     } else {
+        if let Some(path) = follow_prompt {
+            outcome.follow_action = show_follow_banner(ui, path);
+        }
         if conflict_detected {
             outcome.conflict_action = show_conflict_banner(ui);
         }
         crate::preview::render::show(ui, state);
     }
     outcome
+}
+
+fn show_follow_banner(ui: &mut egui::Ui, path: &Path) -> FollowAction {
+    let mut action = FollowAction::None;
+    let label = path.display().to_string();
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgba_unmultiplied(80, 160, 220, 30))
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "Claude が {label} を編集しました。 切替えますか？",
+                        ))
+                        .color(egui::Color32::from_rgb(80, 160, 220)),
+                    )
+                    .selectable(false),
+                );
+                if ui
+                    .small_button("開く")
+                    .on_hover_text("preview を新ファイルに切替")
+                    .clicked()
+                {
+                    action = FollowAction::Accept;
+                }
+                if ui
+                    .small_button("留まる")
+                    .on_hover_text("現在の編集を続ける (バナーを閉じる)")
+                    .clicked()
+                {
+                    action = FollowAction::Dismiss;
+                }
+            });
+        });
+    ui.separator();
+    action
 }
 
 fn show_conflict_banner(ui: &mut egui::Ui) -> ConflictAction {

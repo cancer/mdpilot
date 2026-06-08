@@ -1230,7 +1230,9 @@ impl eframe::App for App {
 
         let tree_open_file: Option<PathBuf>;
         let conflict_action;
+        let follow_action;
         let conflict_detected = tab.conflict_detected;
+        let follow_prompt = tab.follow_prompt.clone();
         {
             let mut on_send = |text: String| {
                 send_text = Some(text);
@@ -1242,11 +1244,13 @@ impl eframe::App for App {
                 &self.project_root,
                 self.file_tree_open,
                 conflict_detected,
+                follow_prompt.as_deref(),
                 session_alive,
                 &mut on_send,
             );
             tree_open_file = outcome.open_file;
             conflict_action = outcome.conflict_action;
+            follow_action = outcome.follow_action;
         }
 
         if let Some(text) = send_text {
@@ -1262,6 +1266,15 @@ impl eframe::App for App {
             }
             crate::ui::preview_pane::ConflictAction::Keep => {
                 self.active_mut().resolve_conflict_with_keep();
+            }
+        }
+        match follow_action {
+            crate::ui::preview_pane::FollowAction::None => {}
+            crate::ui::preview_pane::FollowAction::Accept => {
+                self.active_mut().accept_follow_prompt();
+            }
+            crate::ui::preview_pane::FollowAction::Dismiss => {
+                self.active_mut().dismiss_follow_prompt();
             }
         }
 

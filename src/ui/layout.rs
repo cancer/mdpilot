@@ -4,7 +4,7 @@ use eframe::egui;
 
 use crate::chat::history::ChatHistory;
 use crate::preview::render::PreviewState;
-use crate::ui::preview_pane::ConflictAction;
+use crate::ui::preview_pane::{ConflictAction, FollowAction};
 
 const MIN_PANE_WIDTH: f32 = 240.0;
 const PREVIEW_PANEL_ID: &str = "preview_pane";
@@ -12,6 +12,7 @@ const PREVIEW_PANEL_ID: &str = "preview_pane";
 pub struct LayoutOutcome {
     pub open_file: Option<PathBuf>,
     pub conflict_action: ConflictAction,
+    pub follow_action: FollowAction,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -22,6 +23,7 @@ pub fn show(
     project_root: &Path,
     tree_open: bool,
     conflict_detected: bool,
+    follow_prompt: Option<&Path>,
     session_alive: bool,
     on_send: &mut dyn FnMut(String),
 ) -> LayoutOutcome {
@@ -30,6 +32,7 @@ pub fn show(
     let mut outcome = LayoutOutcome {
         open_file: None,
         conflict_action: ConflictAction::None,
+        follow_action: FollowAction::None,
     };
 
     let preview_response = egui::Panel::left(PREVIEW_PANEL_ID)
@@ -43,9 +46,11 @@ pub fn show(
                 project_root,
                 tree_open,
                 conflict_detected,
+                follow_prompt,
             );
             outcome.open_file = inner.open_file;
             outcome.conflict_action = inner.conflict_action;
+            outcome.follow_action = inner.follow_action;
         });
 
     // Hit-strip on the right edge of the preview pane: a thin column where the
