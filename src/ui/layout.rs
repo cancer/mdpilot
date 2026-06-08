@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use eframe::egui;
 
 use crate::chat::history::ChatHistory;
@@ -6,22 +8,31 @@ use crate::preview::render::PreviewState;
 const MIN_PANE_WIDTH: f32 = 240.0;
 const PREVIEW_PANEL_ID: &str = "preview_pane";
 
+pub struct LayoutOutcome {
+    pub open_file: Option<PathBuf>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     history: &mut ChatHistory,
     preview: &mut PreviewState,
+    project_root: &Path,
+    tree_open: bool,
     session_alive: bool,
     on_send: &mut dyn FnMut(String),
-) {
+) -> LayoutOutcome {
     let avail = ui.available_width();
     let max_left = (avail - MIN_PANE_WIDTH).max(MIN_PANE_WIDTH);
+    let mut outcome = LayoutOutcome { open_file: None };
 
     let preview_response = egui::Panel::left(PREVIEW_PANEL_ID)
         .resizable(true)
         .default_size(avail / 2.0)
         .size_range(MIN_PANE_WIDTH..=max_left)
         .show_inside(ui, |ui| {
-            crate::ui::preview_pane::show(ui, preview);
+            let inner = crate::ui::preview_pane::show(ui, preview, project_root, tree_open);
+            outcome.open_file = inner.open_file;
         });
 
     // Hit-strip on the right edge of the preview pane: a thin column where the
@@ -43,6 +54,7 @@ pub fn show(
     egui::CentralPanel::default().show_inside(ui, |ui| {
         crate::ui::chat_pane::show(ui, history, session_alive, on_send);
     });
+    outcome
 }
 
 /// Drop the persisted panel state so the next frame falls back to

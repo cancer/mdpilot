@@ -106,6 +106,11 @@ pub struct App {
     /// a pre-loaded session list. The list is captured on open
     /// (cheap directory scan) and not refreshed per-frame.
     session_picker: Option<SessionPickerData>,
+
+    /// Phase 9.X.4: file-tree sidebar visibility. Defaults to closed;
+    /// the user opens it with Cmd+B or the path-bar toggle, then
+    /// clicks a `.md` entry to load it into the preview.
+    file_tree_open: bool,
 }
 
 /// Phase 9.X.2: pre-loaded contents of the resume-picker modal.
@@ -222,6 +227,7 @@ impl App {
             session_persisted_this_run: false,
             previews_persisted: std::collections::HashMap::new(),
             session_picker: None,
+            file_tree_open: false,
         }
     }
 
@@ -479,36 +485,11 @@ impl App {
         &mut self.tabs[self.active_tab]
     }
 
-    /// `docs/ui.md` §6.2: `Cmd+R` (mac) / `Ctrl+R` (Win/Linux) forces
-    /// the active tab's preview to reload from disk.
-    fn consume_reload_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::R);
-        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
-        if pressed {
-            self.active_mut().reload_current();
-        }
-        pressed
-    }
-
-    /// `docs/ui.md` §6.2: `Cmd+O` / `Ctrl+O` opens a Markdown
-    /// picker. Selection replaces the active tab's preview and
-    /// disables that tab's auto-follow (`docs/preview.md` §9.1.1).
-    fn consume_open_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
-        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
-        if !pressed {
-            return false;
-        }
-
-        let start_dir = self.file_picker_start_dir();
-        let picked = rfd::FileDialog::new()
-            .add_filter("Markdown", &["md", "markdown"])
-            .set_directory(&start_dir)
-            .pick_file();
-        let Some(path) = picked else {
-            return true;
-        };
-
+    /// Phase 9.X.4: load `path` into the active tab's preview after
+    /// a file-tree click. Mirrors what `Cmd+O` used to do — drops
+    /// auto-follow to OFF so the user's explicit choice isn't
+    /// immediately stomped on by the project watcher.
+    fn open_file_from_tree(&mut self, path: PathBuf) {
         let label = path.to_string_lossy().into_owned();
         let tab = self.active_mut();
         match loader::load_markdown(&path) {
@@ -520,7 +501,7 @@ impl App {
                 tracing::warn!(
                     path = %label,
                     ?error,
-                    "Cmd+O target failed to load",
+                    "file-tree pick failed to load",
                 );
                 tab.preview.set_error(label, error);
             }
@@ -529,7 +510,73 @@ impl App {
         tab.pending_follow = None;
         tab.auto_follow_enabled = false;
         tab.sync_watch_target();
+    }
+
+    /// `docs/ui.md` §6.2: `Cmd+R` (mac) / `Ctrl+R` (Win/Linux) forces
+    /// the active tab's preview to reload from disk.
+    fn consume_reload_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::R);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if pressed {
+            self.active_mut().reload_current();
+        }
+        pressed
+    }
+
+    /// `Cmd+O` / `Ctrl+O` opens a *directory* picker (Phase 9.X.4
+    /// — was a markdown file picker before). The selected directory
+    /// is opened as a new mdpilot window via `current_exe()` spawn,
+    /// so the current window's tabs and chat sessions stay intact.
+    fn consume_open_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if !pressed {
+            return false;
+        }
+
+        let start_dir = self.project_root.clone();
+        let picked = rfd::FileDialog::new()
+            .set_directory(&start_dir)
+            .pick_folder();
+        let Some(dir) = picked else {
+            return true;
+        };
+
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not resolve current_exe for Cmd+O spawn");
+                return true;
+            }
+        };
+        match std::process::Command::new(&exe).arg(&dir).spawn() {
+            Ok(child) => {
+                tracing::info!(
+                    pid = child.id(),
+                    dir = %dir.display(),
+                    "spawned new mdpilot window",
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    dir = %dir.display(),
+                    "failed to spawn new mdpilot window",
+                );
+            }
+        }
         true
+    }
+
+    /// Phase 9.X.4: `Cmd+B` / `Ctrl+B` toggles the file-tree
+    /// sidebar in the preview pane. Mirrors the path-bar button.
+    fn consume_tree_toggle_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::B);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if pressed {
+            self.file_tree_open = !self.file_tree_open;
+        }
+        pressed
     }
 
     /// `docs/ui.md` §6.2: `Cmd+\` / `Ctrl+\` resets the pane split
@@ -602,17 +649,6 @@ impl App {
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(new_title.clone()));
         self.last_window_title = new_title;
-    }
-
-    fn file_picker_start_dir(&self) -> PathBuf {
-        match &self.active().preview.status {
-            PreviewStatus::Loaded { document, .. } => document
-                .path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| self.project_root.clone()),
-            _ => self.project_root.clone(),
-        }
     }
 
     /// Phase 6.3: drain project-tree watch events and arm the active
@@ -850,6 +886,7 @@ impl eframe::App for App {
         self.consume_new_tab_shortcut(ctx);
         self.consume_close_tab_shortcut(ctx);
         self.consume_tab_switch_shortcuts(ctx);
+        self.consume_tree_toggle_shortcut(ctx);
         self.maybe_persist_active_session();
         self.maybe_persist_session_previews();
         self.update_window_title(ctx);
@@ -892,14 +929,19 @@ impl eframe::App for App {
         }
 
         let active_idx = self.active_tab;
+        let file_tree_open = self.file_tree_open;
         let tab = &mut self.tabs[active_idx];
         let session_alive = tab.session.is_some();
         let mut send_text: Option<String> = None;
         let mut follow_toggled = false;
+        let mut tree_toggled = false;
 
         {
             let mut on_toggle_follow = || {
                 follow_toggled = true;
+            };
+            let mut on_toggle_tree = || {
+                tree_toggled = true;
             };
             egui::Panel::top("path_bar").show_inside(ui, |ui| {
                 crate::ui::path_bar::show(
@@ -909,6 +951,8 @@ impl eframe::App for App {
                     &mut on_toggle_follow,
                     tab.watcher_error.as_deref(),
                     session_alive,
+                    file_tree_open,
+                    &mut on_toggle_tree,
                 );
             });
         }
@@ -919,22 +963,32 @@ impl eframe::App for App {
                 "auto-follow toggled via path bar",
             );
         }
+        if tree_toggled {
+            self.file_tree_open = !self.file_tree_open;
+        }
 
+        let tree_open_file: Option<PathBuf>;
         {
             let mut on_send = |text: String| {
                 send_text = Some(text);
             };
-            crate::ui::layout::show(
+            let outcome = crate::ui::layout::show(
                 ui,
                 &mut tab.chat,
                 &mut tab.preview,
+                &self.project_root,
+                self.file_tree_open,
                 session_alive,
                 &mut on_send,
             );
+            tree_open_file = outcome.open_file;
         }
 
         if let Some(text) = send_text {
             tab.handle_send(text);
+        }
+        if let Some(path) = tree_open_file {
+            self.open_file_from_tree(path);
         }
 
         self.show_chat_quote_bubble(ui.ctx());

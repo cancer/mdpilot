@@ -1,4 +1,5 @@
 pub mod chat_pane;
+pub mod file_tree;
 pub mod fonts;
 pub mod layout;
 pub mod path_bar;

@@ -17,6 +17,7 @@ const CLAUDE_OK: egui::Color32 = egui::Color32::from_rgb(80, 200, 100);
 const CLAUDE_DOWN: egui::Color32 = egui::Color32::from_rgb(220, 90, 80);
 const WARN_AMBER: egui::Color32 = egui::Color32::from_rgb(220, 180, 70);
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     preview: &PreviewState,
@@ -24,11 +25,11 @@ pub fn show(
     on_toggle_follow: &mut dyn FnMut(),
     watcher_error: Option<&str>,
     session_alive: bool,
+    file_tree_open: bool,
+    on_toggle_tree: &mut dyn FnMut(),
 ) {
     ui.horizontal(|ui| {
         let path_text = preview_path_label(preview);
-        // `truncate()` keeps very long paths from blowing the bar
-        // wider than the window — egui truncates with an ellipsis.
         ui.add(
             egui::Label::new(egui::RichText::new(path_text))
                 .selectable(true)
@@ -61,6 +62,20 @@ pub fn show(
             };
             if ui.small_button(follow_text).clicked() {
                 on_toggle_follow();
+            }
+            ui.separator();
+
+            let tree_text = if file_tree_open {
+                "ツリー: ON"
+            } else {
+                "ツリー: OFF"
+            };
+            if ui
+                .small_button(tree_text)
+                .on_hover_text("ファイルツリー サイドバー (Cmd+B)")
+                .clicked()
+            {
+                on_toggle_tree();
             }
         });
     });
