@@ -317,8 +317,7 @@ fn show_source_grid(
     // get x-offset from the body's left edge. CJK is wider in real
     // fonts but stays close enough for the bar to read as "the
     // cursor is around here".
-    let mono_font = egui::FontId::monospace(SOURCE_FONT_SIZE);
-    let char_width = ui.ctx().fonts_mut(|f| f.glyph_width(&mono_font, ' '));
+    let _mono_font = egui::FontId::monospace(SOURCE_FONT_SIZE);
     // Phase 10.6 (vis): match-highlight background. Mid-amber that
     // reads on both syntect themes.
     let match_bg = egui::Color32::from_rgba_unmultiplied(220, 180, 70, 90);
@@ -414,12 +413,31 @@ fn show_source_grid(
                 if body_job.sections.is_empty() {
                     append(&mut body_job, " ", fallback_body_color, FontStyle::empty());
                 }
-                let body_resp = ui.add(egui::Label::new(body_job).selectable(true).wrap());
+                // Lay out the body ourselves so we can read back the
+                // wrapped row positions for char-precise cursor
+                // placement. `label_text_selection` (egui's plugin
+                // API) paints the galley and handles selection,
+                // matching what `egui::Label::selectable(true)`
+                // would have done internally.
+                body_job.wrap.max_width = ui.available_width();
+                let galley = ui.ctx().fonts_mut(|f| f.layout_job(body_job));
+                let (body_rect, body_resp) =
+                    ui.allocate_exact_size(galley.size(), egui::Sense::click_and_drag());
+                egui::text_selection::LabelSelectionState::label_text_selection(
+                    ui,
+                    &body_resp,
+                    body_rect.min,
+                    galley.clone(),
+                    fallback_body_color,
+                    egui::Stroke::NONE,
+                );
 
                 // Cursor row indicator + char-precise cursor bar.
-                // Char-precise is required to see horizontal motion
-                // (h/l/0/$/w/b/e); monospace lets us compute column ×
-                // glyph-width without poking at the Galley.
+                // `Galley::pos_from_cursor` returns a 0-width Rect
+                // that already accounts for wrapped rows and the
+                // actual glyph metrics, so the cursor lands where the
+                // text was actually drawn — even mid-wrap and with
+                // CJK characters.
                 if Some(idx) == cursor_line {
                     if let Some(ed) = editor {
                         let cursor_color = match ed.mode() {
@@ -433,19 +451,27 @@ fn show_source_grid(
                         );
                         ui.painter().rect_filled(bar_rect, 0.0, cursor_color);
                         let row_tint = cursor_color.linear_multiply(0.16);
-                        ui.painter().rect_filled(body_resp.rect, 0.0, row_tint);
+                        ui.painter().rect_filled(body_rect, 0.0, row_tint);
                         if let Some(cur) = cursor_pos {
                             let line_local_byte = cur.saturating_sub(line_range.start);
-                            let col = line[..line_local_byte.min(line.len())].chars().count();
-                            let cx = body_resp.rect.left() + col as f32 * char_width;
+                            let char_idx = line[..line_local_byte.min(line.len())].chars().count();
+                            let ccursor = egui::text::CCursor::new(char_idx);
+                            let cursor_local = galley.pos_from_cursor(ccursor);
                             let cursor_bar = egui::Rect::from_min_max(
-                                egui::pos2(cx, body_resp.rect.top()),
-                                egui::pos2(cx + 2.0, body_resp.rect.bottom()),
+                                egui::pos2(
+                                    body_rect.min.x + cursor_local.min.x,
+                                    body_rect.min.y + cursor_local.min.y,
+                                ),
+                                egui::pos2(
+                                    body_rect.min.x + cursor_local.min.x + 2.0,
+                                    body_rect.min.y + cursor_local.max.y,
+                                ),
                             );
                             ui.painter().rect_filled(cursor_bar, 0.0, cursor_color);
                         }
                     }
                 }
+                let _ = body_resp;
 
                 ui.end_row();
                 line_start_in_buffer += line_len;
