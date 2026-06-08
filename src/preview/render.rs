@@ -311,12 +311,23 @@ fn show_source_grid(
     // within that line, byte-wise) so we can paint a cursor marker
     // on the matching row below.
     let cursor_line = editor.map(|ed| line_index_of(source, ed.vim.cursor()));
+    // Phase 10.6 (vis): match-highlight background. Mid-amber that
+    // reads on both syntect themes.
+    let match_bg = egui::Color32::from_rgba_unmultiplied(220, 180, 70, 90);
+    let active_match_bg = egui::Color32::from_rgba_unmultiplied(255, 140, 60, 140);
+    let empty_matches: &[std::ops::Range<usize>] = &[];
+    let (matches, active_match_idx) = editor
+        .map(|ed| (ed.vim.search_matches(), ed.vim.current_match()))
+        .unwrap_or((empty_matches, None));
 
     egui::Grid::new("preview_source_grid")
         .num_columns(2)
         .spacing(egui::vec2(separator_pad * 2.0, row_spacing_y))
         .show(ui, |ui| {
+            let mut line_start_in_buffer: usize = 0;
             for (idx, raw_line) in LinesWithEndings::from(source).enumerate() {
+                let line_len = raw_line.len();
+                let line_range = line_start_in_buffer..(line_start_in_buffer + line_len);
                 let line_no = idx + 1;
                 let gutter_text = format_gutter(line_no, gutter_width);
                 let gutter_resp = ui.add(
@@ -338,20 +349,58 @@ fn show_source_grid(
                 );
 
                 let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+                // Phase 10.6 (vis): collect every search-match range
+                // that overlaps this line so the segment splitter
+                // below can inject a background-tinted section for
+                // each one. `active` marks the currently-highlighted
+                // match (n/N target) with a stronger color.
+                let line_match_ranges: Vec<(std::ops::Range<usize>, bool)> = matches
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, m)| {
+                        let lo = m.start.max(line_range.start);
+                        let hi = m.end.min(line_range.end);
+                        if lo >= hi {
+                            return None;
+                        }
+                        let is_active = Some(i) == active_match_idx;
+                        Some(((lo - line_range.start)..(hi - line_range.start), is_active))
+                    })
+                    .collect();
+
                 let mut body_job = egui::text::LayoutJob::default();
                 match highlighter.highlight_line(raw_line, set) {
                     Ok(ranges) => {
+                        let mut piece_start = 0usize;
                         for (style, piece) in ranges {
-                            let piece = piece.strip_suffix('\n').unwrap_or(piece);
-                            if piece.is_empty() {
-                                continue;
+                            let trimmed = piece.strip_suffix('\n').unwrap_or(piece);
+                            if !trimmed.is_empty() {
+                                let color = syntect_to_egui(style.foreground);
+                                append_with_matches(
+                                    &mut body_job,
+                                    trimmed,
+                                    piece_start,
+                                    color,
+                                    style.font_style,
+                                    &line_match_ranges,
+                                    match_bg,
+                                    active_match_bg,
+                                );
                             }
-                            let color = syntect_to_egui(style.foreground);
-                            append(&mut body_job, piece, color, style.font_style);
+                            piece_start += piece.len();
                         }
                     }
                     Err(_) => {
-                        append(&mut body_job, line, fallback_body_color, FontStyle::empty());
+                        append_with_matches(
+                            &mut body_job,
+                            line,
+                            0,
+                            fallback_body_color,
+                            FontStyle::empty(),
+                            &line_match_ranges,
+                            match_bg,
+                            active_match_bg,
+                        );
                     }
                 }
                 if body_job.sections.is_empty() {
@@ -359,12 +408,11 @@ fn show_source_grid(
                 }
                 let body_resp = ui.add(egui::Label::new(body_job).selectable(true).wrap());
 
-                // Cursor marker. Phase 10.2 minimum: highlight the
-                // entire row containing the cursor with a subtle
-                // background bar on the gutter, plus a tinted left
-                // edge on the body. A proper char-precise cursor
-                // needs the body's Galley which Label doesn't expose;
-                // 10.3 / 10.4 will refine this.
+                // Phase 10.2 + this fix: cursor row indicator. Bumped
+                // the body tint from 0.08 → 0.22 for legibility (the
+                // earlier value was nearly invisible), and added a
+                // 3px accent bar along the left edge of the body to
+                // mirror VS Code's active-line indicator.
                 if Some(idx) == cursor_line {
                     if let Some(ed) = editor {
                         let cursor_color = match ed.mode() {
@@ -373,18 +421,102 @@ fn show_source_grid(
                             VimMode::Visual => egui::Color32::from_rgb(220, 180, 70),
                         };
                         let bar_rect = egui::Rect::from_min_max(
-                            egui::pos2(gutter_resp.rect.left() - 3.0, gutter_resp.rect.top()),
+                            egui::pos2(gutter_resp.rect.left() - 4.0, gutter_resp.rect.top()),
                             egui::pos2(gutter_resp.rect.left() - 1.0, gutter_resp.rect.bottom()),
                         );
                         ui.painter().rect_filled(bar_rect, 0.0, cursor_color);
-                        let row_tint = cursor_color.linear_multiply(0.08);
+                        let row_tint = cursor_color.linear_multiply(0.22);
                         ui.painter().rect_filled(body_resp.rect, 0.0, row_tint);
+                        let body_bar = egui::Rect::from_min_max(
+                            body_resp.rect.left_top(),
+                            egui::pos2(body_resp.rect.left() + 3.0, body_resp.rect.bottom()),
+                        );
+                        ui.painter().rect_filled(body_bar, 0.0, cursor_color);
                     }
                 }
 
                 ui.end_row();
+                line_start_in_buffer += line_len;
             }
         });
+}
+
+/// Phase 10.6 (vis): append `text` to `job` while splitting it into
+/// segments that intersect with the search-match ranges. Match
+/// segments get a `background` color (active match wins over normal
+/// match if both apply to the same offset).
+#[allow(clippy::too_many_arguments)]
+fn append_with_matches(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    text_start_in_line: usize,
+    color: egui::Color32,
+    style: FontStyle,
+    line_matches: &[(std::ops::Range<usize>, bool)],
+    match_bg: egui::Color32,
+    active_match_bg: egui::Color32,
+) {
+    if line_matches.is_empty() {
+        append(job, text, color, style);
+        return;
+    }
+    // Walk the text and emit alternating non-match / match runs.
+    // We compare positions in line-local byte space; conversion to
+    // text-local is straightforward via `text_start_in_line`.
+    let text_end = text_start_in_line + text.len();
+    let mut cursor = text_start_in_line;
+    // Sort matches by start so we can sweep left-to-right; matches
+    // shouldn't overlap, so simple iteration is enough.
+    let mut sorted: Vec<&(std::ops::Range<usize>, bool)> = line_matches.iter().collect();
+    sorted.sort_by_key(|(r, _)| r.start);
+    for (range, is_active) in sorted {
+        if range.end <= cursor || range.start >= text_end {
+            continue;
+        }
+        if range.start > cursor {
+            let plain = &text[(cursor - text_start_in_line)..(range.start - text_start_in_line)];
+            append(job, plain, color, style);
+        }
+        let mat_start = range.start.max(cursor);
+        let mat_end = range.end.min(text_end);
+        let mat = &text[(mat_start - text_start_in_line)..(mat_end - text_start_in_line)];
+        let bg = if *is_active {
+            active_match_bg
+        } else {
+            match_bg
+        };
+        append_with_bg(job, mat, color, style, bg);
+        cursor = mat_end;
+    }
+    if cursor < text_end {
+        let tail = &text[(cursor - text_start_in_line)..];
+        append(job, tail, color, style);
+    }
+}
+
+fn append_with_bg(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    color: egui::Color32,
+    style: FontStyle,
+    background: egui::Color32,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let mut format = egui::TextFormat {
+        font_id: egui::FontId::monospace(SOURCE_FONT_SIZE),
+        color,
+        background,
+        ..Default::default()
+    };
+    if style.contains(FontStyle::ITALIC) {
+        format.italics = true;
+    }
+    if style.contains(FontStyle::UNDERLINE) {
+        format.underline = egui::Stroke::new(1.0, color);
+    }
+    job.append(text, 0.0, format);
 }
 
 /// Return the line index (0-based) containing byte offset `pos`.
