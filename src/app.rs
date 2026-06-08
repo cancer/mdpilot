@@ -111,6 +111,10 @@ pub struct App {
     /// the user opens it with Cmd+B or the path-bar toggle, then
     /// clicks a `.md` entry to load it into the preview.
     file_tree_open: bool,
+    /// Phase 10.9: tree's own keynav state (expanded dirs, selected
+    /// index, focus). Lives at App scope so it survives tree
+    /// hide/show.
+    file_tree_state: crate::ui::file_tree::FileTreeState,
 
     /// Phase 9.X.5: "no project chosen yet" state.
     ///
@@ -247,6 +251,7 @@ impl App {
             previews_persisted: std::collections::HashMap::new(),
             session_picker: None,
             file_tree_open: false,
+            file_tree_state: crate::ui::file_tree::FileTreeState::default(),
             is_unbound,
         }
     }
@@ -662,6 +667,10 @@ impl App {
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
             self.file_tree_open = !self.file_tree_open;
+            // Phase 10.9: opening the tree gives it focus so j/k
+            // takes effect immediately; closing it returns focus
+            // to the preview (vim engine).
+            self.file_tree_state.focused = self.file_tree_open;
         }
         pressed
     }
@@ -698,6 +707,11 @@ impl App {
         let chat_focused =
             ctx.memory(|mem| mem.focused() == Some(crate::chat::view::chat_input_id()));
         if chat_focused {
+            return;
+        }
+        // Phase 10.9: while the file tree owns focus, keys go there
+        // rather than into the vim engine.
+        if self.file_tree_state.focused {
             return;
         }
         let events: Vec<egui::Event> = ctx.input(|i| i.events.to_vec());
@@ -1231,6 +1245,7 @@ impl eframe::App for App {
         let tree_open_file: Option<PathBuf>;
         let conflict_action;
         let follow_action;
+        let tree_exit_to_preview;
         let conflict_detected = tab.conflict_detected;
         let follow_prompt = tab.follow_prompt.clone();
         {
@@ -1243,6 +1258,7 @@ impl eframe::App for App {
                 &mut tab.preview,
                 &self.project_root,
                 self.file_tree_open,
+                &mut self.file_tree_state,
                 conflict_detected,
                 follow_prompt.as_deref(),
                 session_alive,
@@ -1251,6 +1267,10 @@ impl eframe::App for App {
             tree_open_file = outcome.open_file;
             conflict_action = outcome.conflict_action;
             follow_action = outcome.follow_action;
+            tree_exit_to_preview = outcome.tree_exit_to_preview;
+        }
+        if tree_exit_to_preview {
+            self.file_tree_state.focused = false;
         }
 
         if let Some(text) = send_text {

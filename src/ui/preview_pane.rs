@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::preview::render::PreviewState;
-use crate::ui::file_tree::{self, FileTreeAction};
+use crate::ui::file_tree::{self, FileTreeAction, FileTreeState};
 
 /// Width of the file-tree sidebar when it's open. Resizing is not
 /// supported yet — matches the `path_bar` decision to keep chrome
@@ -18,6 +18,9 @@ pub struct PreviewPaneOutcome {
     pub conflict_action: ConflictAction,
     /// Phase 10.7: user picked one of the follow-prompt buttons.
     pub follow_action: FollowAction,
+    /// Phase 10.9: tree user pressed Esc → caller should move focus
+    /// back to preview.
+    pub tree_exit_to_preview: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +46,7 @@ pub fn show(
     state: &mut PreviewState,
     project_root: &Path,
     tree_open: bool,
+    tree_state: &mut FileTreeState,
     conflict_detected: bool,
     follow_prompt: Option<&Path>,
 ) -> PreviewPaneOutcome {
@@ -50,16 +54,17 @@ pub fn show(
         open_file: None,
         conflict_action: ConflictAction::None,
         follow_action: FollowAction::None,
+        tree_exit_to_preview: false,
     };
     if tree_open {
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(FILE_TREE_WIDTH, ui.available_height()),
                 egui::Layout::top_down(egui::Align::LEFT),
-                |ui| {
-                    if let FileTreeAction::Open(path) = file_tree::show(ui, project_root) {
-                        outcome.open_file = Some(path);
-                    }
+                |ui| match file_tree::show(ui, project_root, tree_state) {
+                    FileTreeAction::Open(path) => outcome.open_file = Some(path),
+                    FileTreeAction::ExitToPreview => outcome.tree_exit_to_preview = true,
+                    FileTreeAction::None => {}
                 },
             );
             ui.separator();
