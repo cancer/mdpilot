@@ -312,6 +312,10 @@ fn show_source_grid(
     // on the matching row below.
     let cursor_pos = editor.map(|ed| ed.vim.cursor());
     let cursor_line = cursor_pos.map(|p| line_index_of(source, p));
+    // Phase 10.6 / Visual mode: byte range of the current visual
+    // selection (inclusive end already baked in by the engine).
+    let visual_range = editor.and_then(|ed| ed.vim.visual_range());
+    let visual_bg = egui::Color32::from_rgba_unmultiplied(220, 180, 70, 90);
     // Phase 10.6 (cursor): char-precise cursor. monospace font means
     // glyph width is uniform — multiply by the line-local column to
     // get x-offset from the body's left edge. CJK is wider in real
@@ -441,6 +445,34 @@ fn show_source_grid(
                 let galley = ui.ctx().fonts_mut(|f| f.layout_job(body_job));
                 let (body_rect, body_resp) =
                     ui.allocate_exact_size(galley.size(), egui::Sense::click_and_drag());
+
+                // Paint the visual-mode selection background *before*
+                // the TextShape so the text stays readable on top.
+                // For wrapped rows we walk char-by-char and union
+                // each glyph's rect via `pos_from_cursor`, which
+                // already knows the wrapped row's y.
+                if let Some(vr) = visual_range.as_ref() {
+                    let lo = vr.start.max(line_range.start);
+                    let hi = vr.end.min(line_range.end);
+                    if lo < hi {
+                        let line_lo = lo - line_range.start;
+                        let line_hi = hi - line_range.start;
+                        let start_char = line[..line_lo.min(line.len())].chars().count();
+                        let end_char = line[..line_hi.min(line.len())].chars().count();
+                        for ci in start_char..end_char {
+                            let cur = egui::text::CCursor::new(ci);
+                            let next_cur = egui::text::CCursor::new(ci + 1);
+                            let a = galley.pos_from_cursor(cur);
+                            let b = galley.pos_from_cursor(next_cur);
+                            let rect = egui::Rect::from_min_max(
+                                egui::pos2(body_rect.min.x + a.min.x, body_rect.min.y + a.min.y),
+                                egui::pos2(body_rect.min.x + b.min.x, body_rect.min.y + a.max.y),
+                            );
+                            ui.painter().rect_filled(rect, 0.0, visual_bg);
+                        }
+                    }
+                }
+
                 egui::text_selection::LabelSelectionState::label_text_selection(
                     ui,
                     &body_resp,
