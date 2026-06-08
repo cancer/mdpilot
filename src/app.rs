@@ -689,12 +689,12 @@ impl App {
         pressed
     }
 
-    /// Phase 10.3 (revised twice): `Cmd+J` / `Cmd+K` cycle focus
-    /// through the open panes. J advances forward
-    /// (Preview → Chat → Tree → Preview …), K advances backward.
+    /// Phase 10.3 (revised, direction swapped per user feedback):
+    /// `Cmd+J` cycles **backward** (Preview ← Chat ← Tree),
+    /// `Cmd+K` cycles **forward** (Preview → Chat → Tree).
     /// Tree is only included when the sidebar is open.
     fn consume_focus_preview_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::J);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
             self.cycle_focus(ctx, false);
@@ -703,7 +703,7 @@ impl App {
     }
 
     fn consume_focus_chat_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::J);
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
             self.cycle_focus(ctx, true);
