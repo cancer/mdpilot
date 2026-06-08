@@ -34,6 +34,15 @@ pub struct SessionStore {
     /// before this field existed) loading cleanly.
     #[serde(default)]
     pub session_previews: BTreeMap<String, PathBuf>,
+
+    /// Phase 9.X.6: most recently used project root across all
+    /// mdpilot launches. Updated whenever a window binds to a
+    /// project (initial launch with a positional path, or a
+    /// `Cmd+O` rebind from an unbound window). Used by the next
+    /// launch-without-positional to reopen "where the user left
+    /// off" instead of falling into the unbound state.
+    #[serde(default)]
+    pub last_project: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -49,6 +58,7 @@ impl Default for SessionStore {
             version: STORE_VERSION,
             entries: BTreeMap::new(),
             session_previews: BTreeMap::new(),
+            last_project: None,
         }
     }
 }
@@ -142,6 +152,16 @@ impl SessionStore {
     /// non-empty preview, or when the store predates this field.
     pub fn get_preview(&self, session_id: &str) -> Option<&Path> {
         self.session_previews.get(session_id).map(|p| p.as_path())
+    }
+
+    /// Record the most recently used project root for the
+    /// "reopen on next launch" feature (Phase 9.X.6).
+    pub fn set_last_project(&mut self, project_root: &Path) {
+        self.last_project = Some(project_root.to_path_buf());
+    }
+
+    pub fn get_last_project(&self) -> Option<&Path> {
+        self.last_project.as_deref()
     }
 }
 
@@ -283,6 +303,20 @@ mod tests {
         assert!(store.get_preview("sid").is_some());
         store.set_preview("sid", None);
         assert!(store.get_preview("sid").is_none());
+    }
+
+    #[test]
+    fn last_project_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        let mut store = SessionStore::default();
+        store.set_last_project(Path::new("/Users/me/projects/blog"));
+        store.save_atomic(&path).unwrap();
+        let loaded = SessionStore::load_or_default(&path);
+        assert_eq!(
+            loaded.get_last_project(),
+            Some(Path::new("/Users/me/projects/blog")),
+        );
     }
 
     #[test]

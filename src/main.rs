@@ -12,7 +12,28 @@ fn main() -> eframe::Result {
     init_tracing();
     install_panic_hook();
     log_app_paths();
-    let cli_opts = cli::parse();
+    let mut cli_opts = cli::parse();
+    // Phase 9.X.6: when launched without a positional path, reopen
+    // the project the user was last working on. Treats the stored
+    // path as if it had been passed on the command line so the
+    // `is_unbound` logic in App::new still works (an explicit
+    // launch is "bound", reopen-by-history is also "bound").
+    if cli_opts.positional.is_none() {
+        if let Some(last) = read_last_project() {
+            if last.is_dir() {
+                tracing::info!(
+                    path = %last.display(),
+                    "reopening last-used project (Phase 9.X.6)",
+                );
+                cli_opts.positional = Some(last);
+            } else {
+                tracing::warn!(
+                    path = %last.display(),
+                    "stored last_project no longer exists; falling back to unbound launch",
+                );
+            }
+        }
+    }
     let project_init = match project::resolve(cli_opts.positional.as_deref()) {
         Ok(p) => p,
         Err(err) => {
@@ -64,4 +85,15 @@ fn log_app_paths() {
         ),
         None => tracing::warn!("could not resolve application paths (no home directory?)"),
     }
+}
+
+/// Phase 9.X.6: peek at `sessions.json` to recover the last-used
+/// project root. Pure read; the writer side lives in `App` after
+/// the GUI starts. Returns `None` when no store exists, no
+/// home dir is resolvable, or the stored field is missing.
+fn read_last_project() -> Option<std::path::PathBuf> {
+    let paths = config::paths::AppPaths::resolve()?;
+    let store_path = paths.data_dir.join("sessions.json");
+    let store = chat::session_store::SessionStore::load_or_default(&store_path);
+    store.get_last_project().map(|p| p.to_path_buf())
 }

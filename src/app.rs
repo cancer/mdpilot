@@ -219,6 +219,14 @@ impl App {
             }
         }
 
+        // Phase 9.X.6: remember the project for next launch. Only
+        // bound launches count — an unbound CWD doesn't represent
+        // a project the user explicitly chose, so persisting it
+        // would defeat the "reopen last project" goal.
+        if !is_unbound {
+            persist_last_project(session_store_path.as_deref(), &project.root);
+        }
+
         Self {
             tabs: vec![initial_tab],
             active_tab: 0,
@@ -638,11 +646,13 @@ impl App {
         );
         self.tabs.push(tab);
         self.active_tab = 0;
-        self.project_root = canonical;
+        self.project_root = canonical.clone();
         self.is_unbound = false;
         self.session_persisted_this_run = false;
         self.previews_persisted.clear();
         self.last_window_title.clear();
+        // Phase 9.X.6: persist as the new "last project" for next launch.
+        persist_last_project(self.session_store_path.as_deref(), &canonical);
     }
 
     /// Phase 9.X.4: `Cmd+B` / `Ctrl+B` toggles the file-tree
@@ -878,6 +888,27 @@ impl App {
             }
         }
         out
+    }
+}
+
+/// Phase 9.X.6: record `project_root` as the last-used project in
+/// `sessions.json`. Best-effort: the store may be unavailable (no
+/// home dir) or write may fail; both are warned and ignored.
+fn persist_last_project(store_path: Option<&Path>, project_root: &Path) {
+    let Some(path) = store_path else {
+        return;
+    };
+    let mut store = SessionStore::load_or_default(path);
+    if store.get_last_project() == Some(project_root) {
+        return;
+    }
+    store.set_last_project(project_root);
+    if let Err(err) = store.save_atomic(path) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %err,
+            "failed to persist last_project",
+        );
     }
 }
 
