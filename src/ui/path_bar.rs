@@ -27,14 +27,24 @@ pub fn show(
     session_alive: bool,
     file_tree_open: bool,
     on_toggle_tree: &mut dyn FnMut(),
+    is_unbound: bool,
 ) {
     ui.horizontal(|ui| {
-        let path_text = preview_path_label(preview);
-        ui.add(
-            egui::Label::new(egui::RichText::new(path_text))
-                .selectable(true)
-                .truncate(),
-        );
+        if is_unbound {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("（プロジェクト未選択 / Cmd+O で選択）").weak(),
+                )
+                .selectable(false),
+            );
+        } else {
+            let path_text = preview_path_label(preview);
+            ui.add(
+                egui::Label::new(egui::RichText::new(path_text))
+                    .selectable(true)
+                    .truncate(),
+            );
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(err) = watcher_error {

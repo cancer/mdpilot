@@ -111,6 +111,16 @@ pub struct App {
     /// the user opens it with Cmd+B or the path-bar toggle, then
     /// clicks a `.md` entry to load it into the preview.
     file_tree_open: bool,
+
+    /// Phase 9.X.5: "no project chosen yet" state.
+    ///
+    /// `true` when mdpilot was launched without a positional path
+    /// argument (e.g. via Dock double-click). The app still functions
+    /// — `project_root` is set to the launch CWD — but `Cmd+O` will
+    /// rebind this window to the freshly-picked directory instead of
+    /// spawning a new process. Becomes `false` permanently after the
+    /// first bind so the next `Cmd+O` opens a new window.
+    is_unbound: bool,
 }
 
 /// Phase 9.X.2: pre-loaded contents of the resume-picker modal.
@@ -137,6 +147,7 @@ enum ChatQuoteState {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, cli: CliOptions, project: ProjectInit) -> Self {
         let startup_started = Instant::now();
+        let is_unbound = cli.positional.is_none();
         crate::ui::fonts::install_japanese(&cc.egui_ctx);
 
         let (project_watcher, project_events_rx, startup_watch_error) =
@@ -228,6 +239,7 @@ impl App {
             previews_persisted: std::collections::HashMap::new(),
             session_picker: None,
             file_tree_open: false,
+            is_unbound,
         }
     }
 
@@ -523,10 +535,18 @@ impl App {
         pressed
     }
 
-    /// `Cmd+O` / `Ctrl+O` opens a *directory* picker (Phase 9.X.4
-    /// — was a markdown file picker before). The selected directory
-    /// is opened as a new mdpilot window via `current_exe()` spawn,
-    /// so the current window's tabs and chat sessions stay intact.
+    /// `Cmd+O` / `Ctrl+O` opens a *directory* picker (Phase 9.X.4).
+    /// Behavior depends on whether this window has been bound to a
+    /// project yet (Phase 9.X.5):
+    ///
+    /// - **Unbound** (launched without a positional argument): rebind
+    ///   this window to the picked directory in-place. Existing tabs
+    ///   are dropped, a fresh tab is created for the new project, and
+    ///   the project watcher restarts. `is_unbound` is then `false`
+    ///   for the rest of the run.
+    /// - **Bound** (this window already represents a project): spawn
+    ///   a new mdpilot process for the picked directory and leave
+    ///   the current window untouched.
     fn consume_open_shortcut(&mut self, ctx: &egui::Context) -> bool {
         let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
@@ -542,30 +562,87 @@ impl App {
             return true;
         };
 
-        let exe = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(err) => {
-                tracing::warn!(error = %err, "could not resolve current_exe for Cmd+O spawn");
-                return true;
-            }
-        };
-        match std::process::Command::new(&exe).arg(&dir).spawn() {
-            Ok(child) => {
-                tracing::info!(
-                    pid = child.id(),
-                    dir = %dir.display(),
-                    "spawned new mdpilot window",
-                );
+        if self.is_unbound {
+            self.bind_to_project(dir);
+        } else {
+            spawn_new_mdpilot_window(&dir);
+        }
+        true
+    }
+
+    /// Phase 9.X.5: rebind the current (unbound) window to `dir`.
+    /// Drops every existing tab so their `ChatSession` Drop impls
+    /// can SIGTERM claude, restarts the project watcher rooted at
+    /// the new dir, and builds a brand-new tab list (with F-11
+    /// auto-resume + preview restore applied to the new project).
+    fn bind_to_project(&mut self, dir: PathBuf) {
+        let canonical = std::fs::canonicalize(&dir).unwrap_or(dir);
+        tracing::info!(dir = %canonical.display(), "binding unbound window to project");
+
+        // Restart project watcher at the new root. Dropping the old
+        // one first stops its background thread cleanly before the
+        // new one starts (notify uses one thread per watcher).
+        self._project_watcher = None;
+        self.project_events_rx = None;
+        match start_project_watcher(&self.ctx, canonical.clone()) {
+            Ok((w, rx)) => {
+                self._project_watcher = Some(w);
+                self.project_events_rx = Some(rx);
             }
             Err(err) => {
                 tracing::warn!(
+                    root = %canonical.display(),
                     error = %err,
-                    dir = %dir.display(),
-                    "failed to spawn new mdpilot window",
+                    "failed to restart project watcher after bind",
                 );
             }
         }
-        true
+
+        // F-11 resume + preview restore for the *new* project root.
+        let (resume, resume_preview_path) = self
+            .session_store_path
+            .as_ref()
+            .map(|path| {
+                let store = SessionStore::load_or_default(path);
+                let Some(entry) = store.get(&canonical) else {
+                    return (None, None);
+                };
+                let uuid = match Uuid::parse_str(&entry.session_id) {
+                    Ok(uuid) => uuid,
+                    Err(_) => return (None, None),
+                };
+                let preview = store
+                    .get_preview(&entry.session_id)
+                    .map(|p| p.to_path_buf());
+                (Some(ResumeSession { session_id: uuid }), preview)
+            })
+            .unwrap_or((None, None));
+
+        let project_init = ProjectInit {
+            root: canonical.clone(),
+            initial_file: None,
+        };
+        let initial_preview = initial_preview_state(&project_init, resume_preview_path.as_deref());
+
+        // Drop every existing tab. We assign a new Vec rather than
+        // mutating in place so any borrow into `self.tabs` is
+        // released before we push the replacement.
+        self.tabs.clear();
+        let tab = Tab::new(
+            &self.ctx,
+            &canonical,
+            initial_preview,
+            self.tab_id_gen.next(),
+            "タブ 1".to_string(),
+            resume,
+        );
+        self.tabs.push(tab);
+        self.active_tab = 0;
+        self.project_root = canonical;
+        self.is_unbound = false;
+        self.session_persisted_this_run = false;
+        self.previews_persisted.clear();
+        self.last_window_title.clear();
     }
 
     /// Phase 9.X.4: `Cmd+B` / `Ctrl+B` toggles the file-tree
@@ -804,6 +881,34 @@ impl App {
     }
 }
 
+/// Phase 9.X.4: launch a fresh mdpilot process for `dir`. Used by
+/// `Cmd+O` when the current window is already bound to a project.
+fn spawn_new_mdpilot_window(dir: &Path) {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not resolve current_exe for spawn");
+            return;
+        }
+    };
+    match std::process::Command::new(&exe).arg(dir).spawn() {
+        Ok(child) => {
+            tracing::info!(
+                pid = child.id(),
+                dir = %dir.display(),
+                "spawned new mdpilot window",
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                dir = %dir.display(),
+                "failed to spawn new mdpilot window",
+            );
+        }
+    }
+}
+
 fn initial_preview_state(project: &ProjectInit, resume_preview: Option<&Path>) -> PreviewState {
     // Priority: explicit positional arg → resume's last preview →
     // project README → empty. The resume-preview path slots in
@@ -930,6 +1035,7 @@ impl eframe::App for App {
 
         let active_idx = self.active_tab;
         let file_tree_open = self.file_tree_open;
+        let is_unbound = self.is_unbound;
         let tab = &mut self.tabs[active_idx];
         let session_alive = tab.session.is_some();
         let mut send_text: Option<String> = None;
@@ -953,6 +1059,7 @@ impl eframe::App for App {
                     session_alive,
                     file_tree_open,
                     &mut on_toggle_tree,
+                    is_unbound,
                 );
             });
         }
