@@ -7,6 +7,7 @@ mod preview;
 mod project;
 mod tab;
 mod ui;
+mod vim;
 
 fn main() -> eframe::Result {
     init_tracing();
