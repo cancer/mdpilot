@@ -109,11 +109,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut PreviewState) {
             } else {
                 SYNTAX_THEME_LIGHT
             };
-            let job = build_layout_job(&document.text, theme_name);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.add(egui::Label::new(job).selectable(true));
+                    show_source_grid(ui, &document.text, theme_name);
                 });
         }
     }
@@ -207,11 +206,18 @@ fn theme_for(name: &str) -> &'static Theme {
         .expect("syntect default-themes ships with at least one theme")
 }
 
-/// Build a single `LayoutJob` containing the gutter + highlighted
-/// markdown body. We make one pass over the document, prefixing each
-/// line with a gutter section (line number, right-aligned to
-/// `gutter_width`) followed by the syntect-colored content.
-fn build_layout_job(source: &str, theme_name: &str) -> egui::text::LayoutJob {
+/// Render the markdown source as a 2-column grid: a fixed-width
+/// gutter (line numbers, non-selectable) on the left and a syntect-
+/// highlighted body Label (selectable, wrap-enabled) on the right.
+///
+/// The split into two Labels per row is what keeps a long, wrapped
+/// body line from crashing into the gutter column — a single
+/// `LayoutJob` cannot express "hanging indent" because epaint's
+/// `leading_space` only applies to the *first* row of a section.
+/// Using `Grid` lets each row's height be set by the body's wrapped
+/// height while the gutter cell stays at its natural single-row
+/// height (top-aligned).
+fn show_source_grid(ui: &mut egui::Ui, source: &str, theme_name: &str) {
     let syntax = markdown_syntax();
     let theme = theme_for(theme_name);
     let mut highlighter = HighlightLines::new(syntax, theme);
@@ -220,9 +226,6 @@ fn build_layout_job(source: &str, theme_name: &str) -> egui::text::LayoutJob {
     let total_lines = source.lines().count().max(1);
     let gutter_width = total_lines.to_string().len();
 
-    // Pick a gutter foreground that fades against the body. We could
-    // pull from the theme's `gutter_foreground` setting, but syntect's
-    // bundled themes set that inconsistently, so just go neutral gray.
     let gutter_color = egui::Color32::from_gray(120);
     let fallback_body_color = if theme_name == SYNTAX_THEME_DARK {
         egui::Color32::from_gray(220)
@@ -230,36 +233,56 @@ fn build_layout_job(source: &str, theme_name: &str) -> egui::text::LayoutJob {
         egui::Color32::from_gray(40)
     };
 
-    let mut job = egui::text::LayoutJob::default();
-    for (idx, line) in LinesWithEndings::from(source).enumerate() {
-        let line_no = idx + 1;
-        let gutter = format_gutter(line_no, gutter_width);
-        append(&mut job, &gutter, gutter_color, FontStyle::empty());
+    egui::Grid::new("preview_source_grid")
+        .num_columns(2)
+        .spacing(egui::vec2(0.0, 0.0))
+        .show(ui, |ui| {
+            for (idx, raw_line) in LinesWithEndings::from(source).enumerate() {
+                let line_no = idx + 1;
+                let gutter_text = format_gutter(line_no, gutter_width);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(gutter_text)
+                            .color(gutter_color)
+                            .monospace()
+                            .size(SOURCE_FONT_SIZE),
+                    )
+                    .selectable(false),
+                );
 
-        // `highlight_line` returns `Vec<(SyntectStyle, &str)>` covering
-        // the line *including* its trailing '\n', so each gutter+body
-        // pair forms a complete visual row in the LayoutJob.
-        match highlighter.highlight_line(line, set) {
-            Ok(ranges) => {
-                for (style, piece) in ranges {
-                    let color = syntect_to_egui(style.foreground);
-                    append(&mut job, piece, color, style.font_style);
+                // Body for this source line. Drop the trailing '\n'
+                // since each row is its own widget; the row break
+                // happens via `ui.end_row()`.
+                let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+                let mut body_job = egui::text::LayoutJob::default();
+                match highlighter.highlight_line(raw_line, set) {
+                    Ok(ranges) => {
+                        for (style, piece) in ranges {
+                            let piece = piece.strip_suffix('\n').unwrap_or(piece);
+                            if piece.is_empty() {
+                                continue;
+                            }
+                            let color = syntect_to_egui(style.foreground);
+                            append(&mut body_job, piece, color, style.font_style);
+                        }
+                    }
+                    Err(_) => {
+                        append(&mut body_job, line, fallback_body_color, FontStyle::empty());
+                    }
                 }
+                // Empty bodies still need a placeholder so the row
+                // has the same baseline height as a non-empty one.
+                if body_job.sections.is_empty() {
+                    append(&mut body_job, " ", fallback_body_color, FontStyle::empty());
+                }
+                ui.add(egui::Label::new(body_job).selectable(true).wrap());
+                ui.end_row();
             }
-            Err(_) => {
-                // syntect can fail on malformed regex states in
-                // user-supplied themes; fall back to plain text so the
-                // viewer never goes blank.
-                append(&mut job, line, fallback_body_color, FontStyle::empty());
-            }
-        }
-    }
-    job
+        });
 }
 
 /// Render the gutter cell for `line_no`. Right-aligned in a field
-/// `width` wide, separated from the body by " │ " so the user can
-/// visually distinguish gutter from content even when they copy.
+/// `width` wide, separated from the body by " │ ".
 pub(crate) fn format_gutter(line_no: usize, width: usize) -> String {
     format!("{:>width$} │ ", line_no, width = width)
 }
@@ -382,36 +405,37 @@ mod tests {
     }
 
     #[test]
-    fn build_layout_job_handles_empty_source() {
-        // Empty document still gets one gutter row so the view doesn't
-        // collapse to zero height — matches the "Empty" preview state
-        // which is handled at a higher level.
-        let job = build_layout_job("", SYNTAX_THEME_DARK);
-        // No body sections; the gutter cell for line 1 is still
-        // appended via the LinesWithEndings iterator only when there
-        // is content. Empty input produces zero rows in syntect.
-        // Verify we don't panic and produce some output.
-        let _ = job;
+    fn show_source_grid_renders_without_panic() {
+        // egui needs an offscreen context to allocate text widgets.
+        // We don't assert on visuals here; the goal is to detect a
+        // panic in the grid-construction code path (e.g. unbounded
+        // Layout::Job, missing syntax). The matching screenshot smoke
+        // is covered by --enable-dev-tools.
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                show_source_grid(ui, "# Title\n\nbody\n", SYNTAX_THEME_DARK);
+            });
+        });
     }
 
     #[test]
-    fn build_layout_job_emits_gutter_per_line() {
-        let job = build_layout_job("# Title\n\nbody\n", SYNTAX_THEME_DARK);
-        let joined: String = job
-            .sections
-            .iter()
-            .map(|s| &job.text[s.byte_range.clone()])
-            .collect();
-        assert!(joined.contains("1 │ "), "first gutter missing: {joined:?}");
-        assert!(joined.contains("2 │ "), "second gutter missing: {joined:?}");
-        assert!(joined.contains("3 │ "), "third gutter missing: {joined:?}");
-        assert!(joined.contains("# Title"), "body missing: {joined:?}");
+    fn show_source_grid_handles_empty_source() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                show_source_grid(ui, "", SYNTAX_THEME_DARK);
+            });
+        });
     }
 
     #[test]
-    fn build_layout_job_falls_back_to_light_theme() {
-        // Pass a known theme name to make sure the lookup path works
-        // for both dark/light selections.
-        let _ = build_layout_job("hello\n", SYNTAX_THEME_LIGHT);
+    fn show_source_grid_works_with_light_theme() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                show_source_grid(ui, "hello\n", SYNTAX_THEME_LIGHT);
+            });
+        });
     }
 }
