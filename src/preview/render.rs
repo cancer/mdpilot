@@ -512,7 +512,9 @@ fn show_source_grid(
                         let cursor_color = match ed.mode() {
                             VimMode::Normal => egui::Color32::from_rgb(80, 160, 220),
                             VimMode::Insert => egui::Color32::from_rgb(80, 200, 100),
-                            VimMode::Visual => egui::Color32::from_rgb(220, 180, 70),
+                            VimMode::Visual | VimMode::VisualLine => {
+                                egui::Color32::from_rgb(220, 180, 70)
+                            }
                         };
                         let bar_rect = egui::Rect::from_min_max(
                             egui::pos2(gutter_rect.left() - 4.0, gutter_rect.top()),

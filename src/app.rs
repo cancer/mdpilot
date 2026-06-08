@@ -783,6 +783,12 @@ impl App {
             if action.buffer_changed {
                 any_buffer_change = true;
             }
+            // Phase 10.6: yank-producing ops (y / yy / dd / x and
+            // Visual y/d/x) mirror their text here; push it to the
+            // OS clipboard so the user can paste outside mdpilot.
+            if let Some(text) = action.copy_to_clipboard {
+                ctx.copy_text(text);
+            }
             // Phase 10.6 keyboard-only quote: when Visual mode's `Y`
             // packaged the selection into the Action, format it and
             // append to chat.input here.

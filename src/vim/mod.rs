@@ -25,7 +25,11 @@ mod tests;
 pub enum Mode {
     Normal,
     Insert,
+    /// Charwise visual selection (`v`).
     Visual,
+    /// Linewise visual selection (`V`). Selection always snaps to
+    /// whole-line boundaries; yank / delete operate linewise.
+    VisualLine,
 }
 
 /// One input event handed to the engine. The host translates platform
@@ -54,6 +58,13 @@ pub struct Action {
     /// engine layer egui-free; the host (App) reads it and routes
     /// to chat.input + format_quote_block.
     pub send_to_chat: Option<String>,
+    /// Phase 10.6: every yank-producing op (`y` in Visual, `yy`,
+    /// `dd`, `d`/`x` in Visual, `x` in Normal) mirrors the yanked
+    /// text here. The host writes it to the OS clipboard so the
+    /// user can paste outside the editor — vim's default behavior
+    /// keeps yank in an internal register only, which is useless
+    /// for the "copy text out of preview" workflow we want.
+    pub copy_to_clipboard: Option<String>,
 }
 
 impl Action {
@@ -160,9 +171,11 @@ impl VimEngine {
     pub fn cursor(&self) -> usize {
         self.cursor
     }
-    /// Visual selection range, `None` outside Visual mode. Always
-    /// returns `start <= end`. Includes the character under the
-    /// cursor — matches vim's "inclusive" visual selection.
+    /// Visual selection range, `None` outside Visual / VisualLine.
+    /// For `Visual` it's a char-inclusive range from anchor to
+    /// cursor. For `VisualLine` it snaps to whole-line bounds
+    /// (including the trailing newline if there is one) so yank
+    /// / delete operate linewise.
     pub fn visual_range(&self) -> Option<Range<usize>> {
         let anchor = self.visual_anchor?;
         let (lo, hi) = if anchor <= self.cursor {
@@ -170,8 +183,23 @@ impl VimEngine {
         } else {
             (self.cursor, anchor)
         };
-        let end = next_char_boundary(&self.buffer, hi);
-        Some(lo..end)
+        match self.mode {
+            Mode::Visual => {
+                let end = next_char_boundary(&self.buffer, hi);
+                Some(lo..end)
+            }
+            Mode::VisualLine => {
+                let (line_start, _) = line_bounds(&self.buffer, lo);
+                let (_, line_end) = line_bounds(&self.buffer, hi);
+                let end = if line_end < self.buffer.len() {
+                    line_end + 1
+                } else {
+                    line_end
+                };
+                Some(line_start..end)
+            }
+            _ => None,
+        }
     }
 
     /// Replace the buffer wholesale (used by the host on reload).
@@ -222,7 +250,7 @@ impl VimEngine {
         match self.mode {
             Mode::Normal => self.apply_normal(event),
             Mode::Insert => self.apply_insert(event),
-            Mode::Visual => self.apply_visual(event),
+            Mode::Visual | Mode::VisualLine => self.apply_visual(event),
         }
     }
 
@@ -278,6 +306,7 @@ impl VimEngine {
                 'o' => self.open_line_below(),
                 'O' => self.open_line_above(),
                 'v' => self.enter_visual(),
+                'V' => self.enter_visual_line(),
                 '/' => self.start_search_prompt(),
                 'n' => self.next_match(),
                 'N' => self.prev_match(),
@@ -480,6 +509,12 @@ impl VimEngine {
         Action::mode_changed()
     }
 
+    fn enter_visual_line(&mut self) -> Action {
+        self.mode = Mode::VisualLine;
+        self.visual_anchor = Some(self.cursor);
+        Action::mode_changed()
+    }
+
     fn exit_visual(&mut self) -> Action {
         self.mode = Mode::Normal;
         self.visual_anchor = None;
@@ -490,23 +525,38 @@ impl VimEngine {
         let Some(range) = self.visual_range() else {
             return Action::default();
         };
+        let linewise = self.mode == Mode::VisualLine;
         self.yank = self.buffer[range].to_string();
-        self.yank_linewise = false;
+        self.yank_linewise = linewise;
+        let clip = self.yank.clone();
         self.exit_visual();
-        Action::mode_changed()
+        Action {
+            mode_changed: true,
+            cursor_moved: true,
+            copy_to_clipboard: Some(clip),
+            ..Default::default()
+        }
     }
 
     fn delete_selection(&mut self) -> Action {
         let Some(range) = self.visual_range() else {
             return Action::default();
         };
+        let linewise = self.mode == Mode::VisualLine;
         self.snapshot_for_undo();
         self.yank = self.buffer[range.clone()].to_string();
-        self.yank_linewise = false;
+        self.yank_linewise = linewise;
+        let clip = self.yank.clone();
         self.buffer.drain(range.clone());
         self.cursor = range.start;
         self.exit_visual();
-        Action::buffer_changed()
+        Action {
+            buffer_changed: true,
+            mode_changed: true,
+            cursor_moved: true,
+            copy_to_clipboard: Some(clip),
+            ..Default::default()
+        }
     }
 
     // ------------------------------------------------------------------
@@ -688,6 +738,7 @@ impl VimEngine {
         self.snapshot_for_undo();
         self.yank = self.buffer[self.cursor..next].to_string();
         self.yank_linewise = false;
+        let clip = self.yank.clone();
         self.buffer.drain(self.cursor..next);
         // Vim keeps cursor on the char that took the removed one's
         // place, except at line end where it steps back.
@@ -696,7 +747,12 @@ impl VimEngine {
         {
             self.step_back_within_line();
         }
-        Action::buffer_changed()
+        Action {
+            buffer_changed: true,
+            cursor_moved: true,
+            copy_to_clipboard: Some(clip),
+            ..Default::default()
+        }
     }
 
     fn delete_line(&mut self) -> Action {
@@ -712,11 +768,17 @@ impl VimEngine {
             self.yank.push('\n');
         }
         self.yank_linewise = true;
+        let clip = self.yank.clone();
         self.buffer.drain(start..delete_end);
         // Cursor goes to the start of the next line (or new last
         // line if we deleted the bottom one).
         self.cursor = start.min(self.buffer.len());
-        Action::buffer_changed()
+        Action {
+            buffer_changed: true,
+            cursor_moved: true,
+            copy_to_clipboard: Some(clip),
+            ..Default::default()
+        }
     }
 
     fn yank_line(&mut self) -> Action {
@@ -725,7 +787,10 @@ impl VimEngine {
         text.push('\n');
         self.yank = text;
         self.yank_linewise = true;
-        Action::default()
+        Action {
+            copy_to_clipboard: Some(self.yank.clone()),
+            ..Default::default()
+        }
     }
 
     fn paste_after(&mut self) -> Action {
