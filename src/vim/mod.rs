@@ -112,6 +112,19 @@ pub struct VimEngine {
     pending: Pending,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    /// Phase 10.6: search state.
+    /// `Some(_)` while the user is typing in the `/`-prompt; the
+    /// string is the query so far. `None` when not prompting.
+    search_prompt: Option<String>,
+    /// Most recently committed search query (from `/` + Enter). Used
+    /// by `n` and `N` to repeat the search.
+    search_query: String,
+    /// Byte ranges in `buffer` matching `search_query`. Recomputed
+    /// after every commit and on `n` / `N` if the buffer changed.
+    /// Empty when there are no matches or no committed query.
+    search_matches: Vec<Range<usize>>,
+    /// Index into `search_matches` of the currently-highlighted match.
+    current_match: Option<usize>,
 }
 
 impl VimEngine {
@@ -126,6 +139,10 @@ impl VimEngine {
             pending: Pending::None,
             undo: Vec::new(),
             redo: Vec::new(),
+            search_prompt: None,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            current_match: None,
         }
     }
 
@@ -163,11 +180,40 @@ impl VimEngine {
         self.undo.clear();
         self.redo.clear();
         self.mode = Mode::Normal;
+        self.search_prompt = None;
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.current_match = None;
+    }
+
+    /// Phase 10.6: read-only access to the live `/`-prompt input.
+    /// `None` when the user is not in the search prompt.
+    pub fn search_prompt(&self) -> Option<&str> {
+        self.search_prompt.as_deref()
+    }
+
+    /// Phase 10.6: all match ranges in `buffer` for the last
+    /// committed `/` query.
+    pub fn search_matches(&self) -> &[Range<usize>] {
+        &self.search_matches
+    }
+
+    /// Phase 10.6: index into `search_matches()` of the currently
+    /// active match, or `None` when the cursor isn't on one.
+    pub fn current_match(&self) -> Option<usize> {
+        self.current_match
     }
 
     /// Feed one event. Returns what changed so the host knows whether
     /// to persist / repaint.
     pub fn apply(&mut self, event: VimEvent) -> Action {
+        // Phase 10.6: search prompt swallows input until Enter or
+        // Escape, regardless of which mode we were in when `/` was
+        // pressed. Practically we only enter the prompt from Normal,
+        // but routing here keeps that flexibility.
+        if self.search_prompt.is_some() {
+            return self.apply_search_prompt(event);
+        }
         match self.mode {
             Mode::Normal => self.apply_normal(event),
             Mode::Insert => self.apply_insert(event),
@@ -224,10 +270,122 @@ impl VimEngine {
                 'a' => self.enter_insert_after_cursor(),
                 'o' => self.open_line_below(),
                 'v' => self.enter_visual(),
+                '/' => self.start_search_prompt(),
+                'n' => self.next_match(),
+                'N' => self.prev_match(),
                 _ => Action::default(),
             },
             _ => Action::default(),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Search
+    // ------------------------------------------------------------------
+
+    fn start_search_prompt(&mut self) -> Action {
+        self.search_prompt = Some(String::new());
+        Action::default()
+    }
+
+    fn apply_search_prompt(&mut self, event: VimEvent) -> Action {
+        match event {
+            VimEvent::Escape => {
+                self.search_prompt = None;
+                Action::default()
+            }
+            VimEvent::Enter => {
+                if let Some(query) = self.search_prompt.take() {
+                    self.execute_search(query);
+                }
+                Action::cursor_moved()
+            }
+            VimEvent::Backspace => {
+                if let Some(q) = self.search_prompt.as_mut() {
+                    q.pop();
+                }
+                Action::default()
+            }
+            VimEvent::Char(c) => {
+                if let Some(q) = self.search_prompt.as_mut() {
+                    q.push(c);
+                }
+                Action::default()
+            }
+            VimEvent::CtrlR => Action::default(),
+        }
+    }
+
+    fn execute_search(&mut self, query: String) {
+        if query.is_empty() {
+            self.search_query.clear();
+            self.search_matches.clear();
+            self.current_match = None;
+            return;
+        }
+        self.search_query = query;
+        self.recompute_matches();
+        if self.search_matches.is_empty() {
+            self.current_match = None;
+            return;
+        }
+        // Jump to first match at or after the cursor, wrapping to 0.
+        let from_cursor = self
+            .search_matches
+            .iter()
+            .position(|r| r.start >= self.cursor);
+        let idx = from_cursor.unwrap_or(0);
+        self.current_match = Some(idx);
+        self.cursor = self.search_matches[idx].start;
+    }
+
+    fn recompute_matches(&mut self) {
+        self.search_matches.clear();
+        if self.search_query.is_empty() {
+            return;
+        }
+        for (start, m) in self.buffer.match_indices(&self.search_query) {
+            self.search_matches.push(start..(start + m.len()));
+        }
+    }
+
+    fn next_match(&mut self) -> Action {
+        if self.search_query.is_empty() {
+            return Action::default();
+        }
+        self.recompute_matches();
+        if self.search_matches.is_empty() {
+            self.current_match = None;
+            return Action::default();
+        }
+        let len = self.search_matches.len();
+        let next = match self.current_match {
+            Some(i) => (i + 1) % len,
+            None => 0,
+        };
+        self.current_match = Some(next);
+        self.cursor = self.search_matches[next].start;
+        Action::cursor_moved()
+    }
+
+    fn prev_match(&mut self) -> Action {
+        if self.search_query.is_empty() {
+            return Action::default();
+        }
+        self.recompute_matches();
+        if self.search_matches.is_empty() {
+            self.current_match = None;
+            return Action::default();
+        }
+        let len = self.search_matches.len();
+        let prev = match self.current_match {
+            Some(0) => len - 1,
+            Some(i) => i - 1,
+            None => len - 1,
+        };
+        self.current_match = Some(prev);
+        self.cursor = self.search_matches[prev].start;
+        Action::cursor_moved()
     }
 
     // ------------------------------------------------------------------

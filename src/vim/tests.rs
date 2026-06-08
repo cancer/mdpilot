@@ -385,3 +385,96 @@ fn line_bounds_on_last_line_no_trailing_newline() {
     let s = "a\nb";
     assert_eq!(line_bounds(s, 2), (2, 3));
 }
+
+#[test]
+fn slash_enters_search_prompt() {
+    let mut e = engine("foo bar foo");
+    e.apply(ch('/'));
+    assert_eq!(e.search_prompt(), Some(""));
+}
+
+#[test]
+fn search_prompt_accumulates_chars() {
+    let mut e = engine("foo bar foo");
+    e.apply(ch('/'));
+    e.apply(ch('f'));
+    e.apply(ch('o'));
+    e.apply(ch('o'));
+    assert_eq!(e.search_prompt(), Some("foo"));
+}
+
+#[test]
+fn search_enter_jumps_to_first_match() {
+    let mut e = engine("aaa foo bbb foo");
+    e.apply(ch('/'));
+    e.apply(ch('f'));
+    e.apply(ch('o'));
+    e.apply(ch('o'));
+    e.apply(VimEvent::Enter);
+    assert_eq!(e.cursor(), 4);
+    assert_eq!(e.search_prompt(), None);
+    assert_eq!(e.search_matches().len(), 2);
+}
+
+#[test]
+fn search_n_jumps_to_next() {
+    let mut e = engine("aaa foo bbb foo ccc foo");
+    e.apply(ch('/'));
+    e.apply(ch('f'));
+    e.apply(ch('o'));
+    e.apply(ch('o'));
+    e.apply(VimEvent::Enter);
+    assert_eq!(e.cursor(), 4);
+    e.apply(ch('n'));
+    assert_eq!(e.cursor(), 12);
+    e.apply(ch('n'));
+    assert_eq!(e.cursor(), 20);
+    e.apply(ch('n'));
+    assert_eq!(e.cursor(), 4, "wraps to first match");
+}
+
+#[test]
+fn search_capital_n_goes_backwards() {
+    let mut e = engine("aaa foo bbb foo ccc foo");
+    e.apply(ch('/'));
+    e.apply(ch('f'));
+    e.apply(ch('o'));
+    e.apply(ch('o'));
+    e.apply(VimEvent::Enter);
+    e.apply(ch('N'));
+    assert_eq!(e.cursor(), 20);
+    e.apply(ch('N'));
+    assert_eq!(e.cursor(), 12);
+}
+
+#[test]
+fn search_no_match_leaves_cursor_unchanged() {
+    let mut e = engine("aaa bbb");
+    e.cursor = 2;
+    e.apply(ch('/'));
+    e.apply(ch('z'));
+    e.apply(VimEvent::Enter);
+    assert_eq!(e.cursor(), 2);
+    assert!(e.search_matches().is_empty());
+}
+
+#[test]
+fn search_escape_aborts_prompt() {
+    let mut e = engine("foo");
+    e.cursor = 1;
+    e.apply(ch('/'));
+    e.apply(ch('x'));
+    e.apply(VimEvent::Escape);
+    assert_eq!(e.search_prompt(), None);
+    assert_eq!(e.cursor(), 1, "abort does not move cursor");
+}
+
+#[test]
+fn search_backspace_deletes_from_prompt() {
+    let mut e = engine("foo");
+    e.apply(ch('/'));
+    e.apply(ch('f'));
+    e.apply(ch('o'));
+    e.apply(VimEvent::Backspace);
+    assert_eq!(e.search_prompt(), Some("f"));
+}

@@ -68,14 +68,14 @@ impl Default for PreviewState {
 
 impl PreviewState {
     pub fn loaded(document: LoadedDocument) -> Self {
-        let editor = EditorState::from_document(&document);
+        let editor = Box::new(EditorState::from_document(&document));
         Self {
             status: PreviewStatus::Loaded { document, editor },
         }
     }
 
     pub fn set_document(&mut self, document: LoadedDocument) {
-        let editor = EditorState::from_document(&document);
+        let editor = Box::new(EditorState::from_document(&document));
         self.status = PreviewStatus::Loaded { document, editor };
     }
 
@@ -102,7 +102,10 @@ pub enum PreviewStatus {
     Empty,
     Loaded {
         document: LoadedDocument,
-        editor: EditorState,
+        /// Boxed because `EditorState` carries the vim engine's
+        /// buffer + search state, which is much heavier than the
+        /// other variants — boxing keeps the enum size symmetric.
+        editor: Box<EditorState>,
     },
     Failed {
         path_label: String,
@@ -149,6 +152,32 @@ pub fn show(ui: &mut egui::Ui, state: &mut PreviewState) {
                 .show(ui, |ui| {
                     show_source_grid(ui, editor.vim.buffer(), theme_name, Some(editor));
                 });
+            // Phase 10.6: search prompt strip lives at the bottom
+            // of the pane while `/` input is active. We render it
+            // *after* the source view so it visually anchors there.
+            if let Some(query) = editor.vim.search_prompt() {
+                ui.separator();
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("/{query}"))
+                            .monospace()
+                            .color(egui::Color32::from_rgb(220, 180, 70)),
+                    )
+                    .selectable(false),
+                );
+            } else if !editor.vim.search_matches().is_empty() {
+                ui.separator();
+                let total = editor.vim.search_matches().len();
+                let current = editor.vim.current_match().map(|i| i + 1).unwrap_or(0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("検索: {current}/{total}"))
+                            .monospace()
+                            .weak(),
+                    )
+                    .selectable(false),
+                );
+            }
         }
     }
 }

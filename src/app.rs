@@ -1450,7 +1450,9 @@ mod tests {
             size_bytes: 0,
             size_class: SizeClass::Small,
         };
-        let editor = crate::preview::render::EditorState::from_document(&document);
+        let editor = Box::new(crate::preview::render::EditorState::from_document(
+            &document,
+        ));
         PreviewStatus::Loaded { document, editor }
     }
 
