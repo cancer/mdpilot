@@ -773,7 +773,13 @@ impl App {
         }
         let tab = &mut self.tabs[self.active_tab];
         let mut any_buffer_change = false;
-        for event in events {
+        // Phase 10.6 fix: collect the indices of events the vim
+        // engine consumes so we can drop them from the egui queue.
+        // Otherwise the same `Event::Text` would be re-read by the
+        // chat input as soon as Y / etc. moves focus there, and the
+        // command key would get re-inserted as literal text.
+        let mut consumed: Vec<usize> = Vec::new();
+        for (idx, event) in events.into_iter().enumerate() {
             let mode = match &tab.preview.status {
                 PreviewStatus::Loaded { editor, .. } => editor.mode(),
                 _ => return,
@@ -781,6 +787,7 @@ impl App {
             let Some(vim_event) = translate_event(&event, mode) else {
                 continue;
             };
+            consumed.push(idx);
             let editor = match &mut tab.preview.status {
                 PreviewStatus::Loaded { editor, .. } => editor,
                 _ => return,
@@ -831,6 +838,17 @@ impl App {
             // egui event loop, so bursty typing still only writes
             // O(frames) times per second.
             tab.save_current_buffer();
+        }
+        if !consumed.is_empty() {
+            ctx.input_mut(|i| {
+                // Walk backwards so each removal doesn't shift the
+                // indices of items still to drop.
+                for &idx in consumed.iter().rev() {
+                    if idx < i.events.len() {
+                        i.events.remove(idx);
+                    }
+                }
+            });
         }
     }
 
