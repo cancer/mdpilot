@@ -549,6 +549,12 @@ impl App {
         tab.pending_follow = None;
         tab.auto_follow_enabled = false;
         tab.sync_watch_target();
+        // ユーザー指示 (2026-06-09): ファイル選択後はそのまま編集に
+        // 入れるよう preview にフォーカスを移す。tree の selection
+        // 自体は残る (再度 Cmd+B で開けば同じ位置から続行)。
+        self.file_tree_state.focused = false;
+        self.ctx
+            .memory_mut(|m| m.surrender_focus(crate::chat::view::chat_input_id()));
     }
 
     /// `docs/ui.md` §6.2: `Cmd+R` (mac) / `Ctrl+R` (Win/Linux) forces
@@ -813,6 +819,11 @@ impl App {
                     tab.chat.input.push('\n');
                 }
                 tab.chat.input.push_str(&block);
+                // ユーザー指示 (2026-06-09): Y で chat に送ったら、
+                // そのまま編集 / 送信できるよう chat input にフォーカ
+                // スを移す。
+                ctx.memory_mut(|m| m.request_focus(crate::chat::view::chat_input_id()));
+                self.file_tree_state.focused = false;
             }
         }
         if any_buffer_change {
