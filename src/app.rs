@@ -919,6 +919,43 @@ impl App {
                 self.select_tab(idx);
             }
         }
+
+        // Phase 10.12 (2026-06-11): Cmd+Shift+[ / ] for prev / next
+        // tab (Safari / Chrome / iTerm 慣習)。macOS では Shift+[ が
+        // `{` として届くケースもあるので、curly bracket 版にも反応
+        // させる。Cmd+Option+← / → は別レイヤーとして将来検討。
+        let prev_modifiers = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        let prev_keys = [egui::Key::OpenBracket, egui::Key::OpenCurlyBracket];
+        for key in prev_keys {
+            let shortcut = egui::KeyboardShortcut::new(prev_modifiers, key);
+            if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+                self.cycle_active_tab(false);
+                break;
+            }
+        }
+        let next_keys = [egui::Key::CloseBracket, egui::Key::CloseCurlyBracket];
+        for key in next_keys {
+            let shortcut = egui::KeyboardShortcut::new(prev_modifiers, key);
+            if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+                self.cycle_active_tab(true);
+                break;
+            }
+        }
+    }
+
+    /// Phase 10.12: shift the active tab by ±1, wrapping at the
+    /// ends. No-op when there's only one tab.
+    fn cycle_active_tab(&mut self, forward: bool) {
+        let n = self.tabs.len();
+        if n <= 1 {
+            return;
+        }
+        let new_idx = if forward {
+            (self.active_tab + 1) % n
+        } else {
+            (self.active_tab + n - 1) % n
+        };
+        self.select_tab(new_idx);
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
