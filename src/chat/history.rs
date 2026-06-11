@@ -12,6 +12,12 @@ use crate::chat::stream::ChatEvent;
 pub struct ChatHistory {
     pub messages: Vec<ChatMessage>,
     pub input: String,
+    /// Phase 10.14 (2026-06-11): true between the moment a user
+    /// prompt is dispatched and the corresponding `result` event
+    /// arrives. The chat view swaps the Send button for an Abort
+    /// button while this flag is set so the user can cut claude
+    /// off when it's running on tangents.
+    pub in_flight: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,6 +175,9 @@ impl ChatHistory {
                 if subtype != "success" {
                     self.push_system(SystemMessage::ResultError { subtype });
                 }
+                // Phase 10.14: result closes the turn; flip the
+                // Send/Abort toggle back to Send.
+                self.in_flight = false;
             }
         }
     }

@@ -1424,9 +1424,13 @@ impl eframe::App for App {
         let tree_exit_to_preview;
         let conflict_detected = tab.conflict_detected;
         let follow_prompt = tab.follow_prompt.clone();
+        let mut abort_requested = false;
         {
             let mut on_send = |text: String| {
                 send_text = Some(text);
+            };
+            let mut on_abort = || {
+                abort_requested = true;
             };
             let outcome = crate::ui::layout::show(
                 ui,
@@ -1439,6 +1443,7 @@ impl eframe::App for App {
                 follow_prompt.as_deref(),
                 session_alive,
                 &mut on_send,
+                &mut on_abort,
             );
             tree_open_file = outcome.open_file;
             conflict_action = outcome.conflict_action;
@@ -1451,6 +1456,13 @@ impl eframe::App for App {
 
         if let Some(text) = send_text {
             tab.handle_send(text);
+        }
+        // Phase 10.14: dispatch abort *after* the layout borrow ends
+        // so we can grab the project_root via `self`.
+        if abort_requested {
+            let ctx = ui.ctx().clone();
+            let root = self.project_root.clone();
+            self.active_mut().abort_current_turn(&ctx, &root);
         }
         if let Some(path) = tree_open_file {
             self.open_file_from_tree(path);

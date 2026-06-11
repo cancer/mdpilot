@@ -571,8 +571,10 @@ impl Tab {
     /// Disconnected banner.
     pub fn handle_send(&mut self, text: String) {
         self.chat.push_user(text.clone());
+        self.chat.in_flight = true;
         let Some(session) = self.session.as_mut() else {
             tracing::warn!("send dispatched without an active claude session");
+            self.chat.in_flight = false;
             return;
         };
         match session.send_user_message(&text) {
@@ -583,6 +585,43 @@ impl Tab {
                     self.chat.push_system(SystemMessage::Disconnected);
                     self.disconnect_announced = true;
                 }
+                self.chat.in_flight = false;
+            }
+        }
+    }
+
+    /// Phase 10.14 (2026-06-11): abort the in-flight claude turn.
+    /// claude CLI 2.1 has no protocol-level interrupt, so we drop
+    /// the child (its Drop sends SIGTERM → SIGKILL after a grace
+    /// period) and immediately re-spawn with `--resume <session>`
+    /// so the next prompt continues the same conversation.
+    pub fn abort_current_turn(&mut self, ctx: &egui::Context, project_root: &Path) {
+        if self.session.is_none() {
+            return;
+        }
+        // Drop the running child. Its Drop impl handles graceful
+        // shutdown + drain join, so we end up with a quiet exit.
+        self.events_rx = None;
+        self.session = None;
+        self.chat.in_flight = false;
+        self.chat.push_system(SystemMessage::ResultError {
+            subtype: "aborted_by_user".to_string(),
+        });
+        // Re-spawn with --resume so the same session can be talked
+        // to again. If spawn fails (claude unavailable) the chat
+        // surfaces the SpawnFailed banner instead.
+        match spawn_session(ctx, project_root.to_path_buf(), self.session_id, true) {
+            Ok((session, rx)) => {
+                self.session = Some(session);
+                self.events_rx = Some(rx);
+                self.disconnect_announced = false;
+                self.session_confirmed = false;
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to respawn claude after abort");
+                self.chat.push_system(SystemMessage::SpawnFailed {
+                    error: err.to_string(),
+                });
             }
         }
     }

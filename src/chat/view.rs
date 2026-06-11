@@ -21,22 +21,24 @@ pub fn chat_input_id() -> egui::Id {
 /// button click or plain Enter. The view stays decoupled from the session
 /// module: the callback owns the stdin write and history update.
 ///
-/// The 中断 button is rendered but permanently disabled: claude CLI 2.1
-/// does not expose a mid-turn interrupt over stdin (see `docs/chat.md` §10
-/// and GitHub issue anthropics/claude-code#41665, closed as duplicate).
-/// We show the button for visual continuity and explain via tooltip.
+/// The Send / Abort button swaps based on `history.in_flight`. When a
+/// turn is in flight, the Abort button (and Esc while the chat owns
+/// focus) kills the claude child via `Tab::abort_current_turn`, which
+/// re-spawns with `--resume` so the same conversation can continue.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     history: &mut ChatHistory,
     session_alive: bool,
     on_send: &mut dyn FnMut(String),
+    on_abort: &mut dyn FnMut(),
 ) {
     let frame_id = ui.id().with("chat_pane_root");
     egui::Panel::bottom(frame_id.with("input"))
         .resizable(false)
         .min_size(72.0)
         .show_inside(ui, |ui| {
-            input_row(ui, history, session_alive, on_send);
+            input_row(ui, history, session_alive, on_send, on_abort);
         });
 
     egui::ScrollArea::vertical()
@@ -70,6 +72,7 @@ fn input_row(
     history: &mut ChatHistory,
     session_alive: bool,
     on_send: &mut dyn FnMut(String),
+    on_abort: &mut dyn FnMut(),
 ) {
     ui.horizontal_top(|ui| {
         let buttons_width = 88.0;
@@ -82,48 +85,54 @@ fn input_row(
                 .hint_text("プロンプトを入力… (Enter で送信、Shift+Enter で改行)"),
         );
 
-        let can_send = session_alive && !history.input.trim().is_empty();
+        let in_flight = history.in_flight;
+        let can_send = !in_flight && session_alive && !history.input.trim().is_empty();
 
-        // Plain Enter submits; Shift+Enter (or any modified Enter) falls
-        // through to the TextEdit so the user gets a literal newline. We
-        // consume the event before TextEdit sees it; otherwise we'd insert
-        // the newline and then send a message ending with `\n`.
-        //
-        // Per egui's input contract (egui::Event::Key doc), key events that
-        // were processed by an IME are *not* delivered. That means while
-        // the IME is composing kana → kanji, the Enter that confirms
-        // composition never appears in this event queue, so we don't need a
-        // separate "composing" guard here.
+        // Plain Enter submits; Shift+Enter falls through. Esc aborts
+        // when chat has focus and a turn is in flight (Phase 10.14).
         let mut submit = false;
-        if editor.has_focus() && ui.input_mut(|i| extract_send_enter(&mut i.events)) && can_send {
-            submit = true;
+        let mut abort_via_key = false;
+        if editor.has_focus() {
+            if ui.input_mut(|i| extract_send_enter(&mut i.events)) && can_send {
+                submit = true;
+            }
+            if in_flight && ui.input_mut(|i| extract_abort_escape(&mut i.events)) {
+                abort_via_key = true;
+            }
         }
 
         ui.vertical(|ui| {
-            if ui
+            // Phase 10.14: Send and Abort are mutually exclusive —
+            // exactly one of them is rendered each frame so the user
+            // can't accidentally double-fire.
+            if in_flight {
+                if ui
+                    .button("中断")
+                    .on_hover_text("Esc でも中断できます")
+                    .clicked()
+                {
+                    abort_via_key = true;
+                }
+            } else if ui
                 .add_enabled(can_send, egui::Button::new("送信"))
                 .clicked()
             {
                 submit = true;
             }
-            // 中断 is permanently disabled in MVP: claude CLI 2.1 has no
-            // mid-turn interrupt over stdin (see docs/chat.md §10). We keep
-            // the button so the layout is stable when upstream lands the
-            // feature; the tooltip tells the user why it's greyed out.
-            ui.add_enabled(false, egui::Button::new("中断"))
-                .on_disabled_hover_text(
-                    "Claude CLI 2.1 は応答中の中断に対応していません。\
-                     応答完了までお待ちください。",
-                );
         });
 
         if submit {
             let text = history.input.trim().to_string();
             history.input.clear();
+            history.in_flight = true;
             // Keep focus on the input so the user can keep typing without
             // clicking back into the field.
             editor.request_focus();
             on_send(text);
+        } else if abort_via_key {
+            history.in_flight = false;
+            editor.request_focus();
+            on_abort();
         }
     });
 }
@@ -156,6 +165,27 @@ pub(crate) fn extract_send_enter(events: &mut Vec<egui::Event>) -> bool {
         _ => true,
     });
     send
+}
+
+/// Phase 10.14: consume Esc from the chat input event queue when a
+/// turn is in flight. Returns true iff one such press was found.
+/// Caller (input_row) only invokes us when the chat owns focus, so
+/// this won't swallow Esc that belongs to other widgets (modal
+/// dismiss, vim engine, …).
+pub(crate) fn extract_abort_escape(events: &mut Vec<egui::Event>) -> bool {
+    let mut abort = false;
+    events.retain(|event| match event {
+        egui::Event::Key {
+            key: egui::Key::Escape,
+            pressed: true,
+            ..
+        } => {
+            abort = true;
+            false
+        }
+        _ => true,
+    });
+    abort
 }
 
 fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
