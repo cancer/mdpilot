@@ -164,6 +164,17 @@ pub(crate) fn extract_send_enter(events: &mut Vec<egui::Event>) -> bool {
         }
         _ => true,
     });
+    // Bug fix (2026-06-11): winit / egui delivers Enter as BOTH an
+    // `Event::Key(Enter)` and an `Event::Text("\n")`. We consumed
+    // the Key above, but the Text leaked through to the TextEdit
+    // and inserted a literal newline into the prompt. Drop the
+    // companion Text("\n") on the same frame we decided to send.
+    // Shift+Enter doesn't hit this path because the Key branch
+    // above leaves `send = false`, so the Text("\n") stays in queue
+    // and the TextEdit performs the expected newline insertion.
+    if send {
+        events.retain(|event| !matches!(event, egui::Event::Text(t) if t == "\n"));
+    }
     send
 }
 
