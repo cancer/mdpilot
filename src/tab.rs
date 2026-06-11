@@ -300,6 +300,27 @@ impl Tab {
         self.follow_prompt = None;
     }
 
+    /// Phase 10.10 (revised 2026-06-11): label to render on the tab
+    /// chip. Prefers the currently-open file's basename so the user
+    /// can scan tabs by filename; falls back to the spawn-time label
+    /// (`タブ N` / `再開 xxxxxxxx`) when nothing is loaded.
+    pub fn display_label(&self) -> String {
+        match &self.preview.status {
+            PreviewStatus::Loaded { document, .. } => document
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| self.label.clone()),
+            PreviewStatus::Failed { path_label, .. } => std::path::Path::new(path_label)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| format!("⚠ {s}"))
+                .unwrap_or_else(|| format!("⚠ {path_label}")),
+            PreviewStatus::Empty => self.label.clone(),
+        }
+    }
+
     /// Path the preview is currently looking at (`Loaded`), or
     /// `None` when the preview is `Empty` or `Failed`. Used by
     /// the App to persist "session → last preview" across runs

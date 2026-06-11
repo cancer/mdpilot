@@ -1287,12 +1287,16 @@ impl eframe::App for App {
         // matching the send_text / follow_toggled pattern used
         // below.
         let tab_action = {
-            let items: Vec<TabBarItem> = self
-                .tabs
+            // Phase 10.10 (revised 2026-06-11): build the labels per
+            // frame from `display_label()` so the chip shows the
+            // currently-open file. Borrows from a local `labels` Vec
+            // satisfy TabBarItem's `&str` lifetime.
+            let labels: Vec<String> = self.tabs.iter().map(|t| t.display_label()).collect();
+            let items: Vec<TabBarItem> = labels
                 .iter()
                 .enumerate()
-                .map(|(idx, tab)| TabBarItem {
-                    label: &tab.label,
+                .map(|(idx, label)| TabBarItem {
+                    label,
                     is_active: idx == self.active_tab,
                 })
                 .collect();
