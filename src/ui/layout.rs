@@ -15,6 +15,10 @@ pub struct LayoutOutcome {
     pub conflict_action: ConflictAction,
     pub follow_action: FollowAction,
     pub tree_exit_to_preview: bool,
+    /// Phase 10.15: screen-space rect of the preview pane this
+    /// frame. App uses it to gate the "→チャット" bubble so that
+    /// a selection inside the chat pane doesn't trigger it.
+    pub preview_rect: egui::Rect,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -38,6 +42,7 @@ pub fn show(
         conflict_action: ConflictAction::None,
         follow_action: FollowAction::None,
         tree_exit_to_preview: false,
+        preview_rect: egui::Rect::NOTHING,
     };
 
     let preview_response = egui::Panel::left(PREVIEW_PANEL_ID)
@@ -59,6 +64,7 @@ pub fn show(
             outcome.follow_action = inner.follow_action;
             outcome.tree_exit_to_preview = inner.tree_exit_to_preview;
         });
+    outcome.preview_rect = preview_response.response.rect;
 
     // Hit-strip on the right edge of the preview pane: a thin column where the
     // resize handle lives. A double-click here resets to a 50/50 split.

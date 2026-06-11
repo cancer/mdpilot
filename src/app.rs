@@ -81,6 +81,13 @@ pub struct App {
     /// (so we don't dismiss while the user is reaching for the button).
     chat_quote_bubble_rect: Option<egui::Rect>,
 
+    /// Phase 10.15 (2026-06-11): preview pane's screen rect from
+    /// the previous frame. Used to gate the chat-quote bubble so
+    /// that text selection inside the chat pane (assistant message
+    /// bodies) doesn't pop up the "→チャット" button.
+    /// `None` before the first frame is laid out.
+    preview_pane_rect: Option<egui::Rect>,
+
     /// Phase 9.X.1 F-11: path to `<data_dir>/sessions.json`. `None`
     /// when `AppPaths::resolve()` failed (no home dir), in which
     /// case session persistence is silently disabled.
@@ -271,6 +278,7 @@ impl App {
             chat_quote_anchor: None,
             chat_quote_dismissed: false,
             chat_quote_bubble_rect: None,
+            preview_pane_rect: None,
             session_store_path,
             session_persisted_this_run: false,
             previews_persisted: std::collections::HashMap::new(),
@@ -1449,6 +1457,7 @@ impl eframe::App for App {
             conflict_action = outcome.conflict_action;
             follow_action = outcome.follow_action;
             tree_exit_to_preview = outcome.tree_exit_to_preview;
+            self.preview_pane_rect = Some(outcome.preview_rect);
         }
         if tree_exit_to_preview {
             self.file_tree_state.focused = false;
@@ -1583,8 +1592,20 @@ impl App {
 
         if released_drag {
             if let Some(pos) = interact_pos {
-                self.chat_quote_anchor = Some(pos + egui::vec2(8.0, 12.0));
-                self.chat_quote_dismissed = false;
+                // Phase 10.15 (2026-06-11): only treat the
+                // drag-release as a quote candidate when it lands in
+                // the preview pane. Without this, selecting text in
+                // the chat pane (assistant bodies) would also pop
+                // the bubble, which makes no sense — we'd be quoting
+                // the chat back to itself.
+                let in_preview = self
+                    .preview_pane_rect
+                    .map(|r| r.contains(pos))
+                    .unwrap_or(false);
+                if in_preview {
+                    self.chat_quote_anchor = Some(pos + egui::vec2(8.0, 12.0));
+                    self.chat_quote_dismissed = false;
+                }
             }
         } else if clicked {
             let inside_bubble = match (interact_pos, self.chat_quote_bubble_rect) {
