@@ -18,6 +18,11 @@ eframe = "0.34"
 # pull in macos_fsevent; the dispatcher thread is owned by `notify`
 # itself, so we don't spawn an extra std::thread for it.
 notify = "8"
+# Phase 10.11 (2026-06-11): fuzzy matcher behind the Cmd+P file picker.
+# `nucleo-matcher` is the lower-level scoring core shared by helix /
+# zellij; the higher-level `nucleo` adds async streaming we don't need
+# (the project's .md tree is small enough to score synchronously).
+nucleo-matcher = "0.3"
 # Native file-picker dialog used by `Cmd+O` / `Ctrl+O` (Phase 7.1).
 # `default-features = false` skips the Linux xdg-portal / wayland deps
 # until Linux support lands (Phase 8 is macOS + Windows only). The

@@ -116,6 +116,11 @@ pub struct App {
     /// hide/show.
     file_tree_state: crate::ui::file_tree::FileTreeState,
 
+    /// Phase 10.11 (2026-06-11): VS Code-style fuzzy file picker.
+    /// `None` when the modal is closed; `Some(_)` while it's open.
+    /// Built fresh per open (walks the project root for `.md`).
+    fuzzy_finder: Option<crate::ui::fuzzy_finder::FuzzyFinderState>,
+
     /// Phase 9.X.5: "no project chosen yet" state.
     ///
     /// `true` when mdpilot was launched without a positional path
@@ -263,6 +268,7 @@ impl App {
             session_picker: None,
             file_tree_open: false,
             file_tree_state: crate::ui::file_tree::FileTreeState::default(),
+            fuzzy_finder: None,
             is_unbound,
         }
     }
@@ -677,6 +683,20 @@ impl App {
             // takes effect immediately; closing it returns focus
             // to the preview (vim engine).
             self.file_tree_state.focused = self.file_tree_open;
+        }
+        pressed
+    }
+
+    /// Phase 10.11 (2026-06-11): `Cmd+P` opens the fuzzy file finder
+    /// modal. Reuses the file-tree's open path so the new preview
+    /// state matches what tree-click would have done.
+    fn consume_fuzzy_finder_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::P);
+        let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
+        if pressed && self.fuzzy_finder.is_none() {
+            self.fuzzy_finder = Some(crate::ui::fuzzy_finder::FuzzyFinderState::open(
+                &self.project_root,
+            ));
         }
         pressed
     }
@@ -1248,6 +1268,7 @@ impl eframe::App for App {
         self.consume_close_tab_shortcut(ctx);
         self.consume_tab_switch_shortcuts(ctx);
         self.consume_tree_toggle_shortcut(ctx);
+        self.consume_fuzzy_finder_shortcut(ctx);
         self.consume_focus_chat_shortcut(ctx);
         self.consume_focus_preview_shortcut(ctx);
         // Phase 10.2: route keyboard input into the active tab's
@@ -1397,6 +1418,7 @@ impl eframe::App for App {
 
         self.show_chat_quote_bubble(ui.ctx());
         self.show_session_picker(ui.ctx());
+        self.show_fuzzy_finder(ui.ctx());
 
         if let Some(cap) = self.debug_screenshot.as_mut() {
             cap.step(ui.ctx());
@@ -1423,6 +1445,26 @@ impl App {
             SessionPickerAction::Resume(session_id) => {
                 self.session_picker = None;
                 self.open_tab_resuming(session_id);
+            }
+        }
+    }
+
+    /// Phase 10.11 (2026-06-11): VS Code-style fuzzy file finder.
+    /// Modal lives in `App.fuzzy_finder`; built on Cmd+P, cleared
+    /// when the user picks a file or hits Esc.
+    fn show_fuzzy_finder(&mut self, ctx: &egui::Context) {
+        let Some(state) = self.fuzzy_finder.as_mut() else {
+            return;
+        };
+        let action = crate::ui::fuzzy_finder::show(ctx, state);
+        match action {
+            crate::ui::fuzzy_finder::FuzzyFinderAction::None => {}
+            crate::ui::fuzzy_finder::FuzzyFinderAction::Close => {
+                self.fuzzy_finder = None;
+            }
+            crate::ui::fuzzy_finder::FuzzyFinderAction::Open(path) => {
+                self.fuzzy_finder = None;
+                self.open_file_from_tree(path);
             }
         }
     }

@@ -1,6 +1,7 @@
 pub mod chat_pane;
 pub mod file_tree;
 pub mod fonts;
+pub mod fuzzy_finder;
 pub mod layout;
 pub mod path_bar;
 pub mod preview_pane;
