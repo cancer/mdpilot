@@ -159,19 +159,20 @@ pub(crate) fn extract_send_enter(events: &mut Vec<egui::Event>) -> bool {
 }
 
 fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
+    let dark = ui.style().visuals.dark_mode;
     match message {
         ChatMessage::User { text } => {
-            ui.add(header_label("User"));
-            ui.add(body_label(text));
+            ui.add(header_label("User", dark));
+            ui.add(body_label(text, dark));
         }
         ChatMessage::Assistant {
             text,
             tools,
             message_id: _,
         } => {
-            ui.add(header_label("Assistant"));
+            ui.add(header_label("Assistant", dark));
             if !text.is_empty() {
-                ui.add(body_label(text));
+                ui.add(body_label(text, dark));
             }
             for tool in tools {
                 render_tool(ui, tool);
@@ -184,15 +185,30 @@ fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
 /// "User" / "Assistant" / "Input" / "Output" — structural markers. Non-
 /// selectable so dragging across messages copies just the bodies, not the
 /// role prefix. The user pays the same Cmd+C and gets a clean transcript.
-fn header_label(text: &str) -> egui::Label {
-    egui::Label::new(egui::RichText::new(text).strong()).selectable(false)
+fn header_label(text: &str, dark: bool) -> egui::Label {
+    egui::Label::new(egui::RichText::new(text).strong().color(body_color(dark))).selectable(false)
 }
 
 /// Message body text — explicitly selectable so the F-05 contract doesn't
 /// depend on egui's `style.interaction.selectable_labels = true` default
 /// staying true in a future version (or a user theme).
-fn body_label(text: &str) -> egui::Label {
-    egui::Label::new(text).selectable(true)
+///
+/// 2026-06-11: body text was hard to read because egui's default
+/// `widget_text_color` blended into the dark background. We pick a
+/// near-white color in dark mode (and near-black in light) so the
+/// transcript reads clearly without overpowering tool / status
+/// blocks (which keep their own colors).
+fn body_label(text: &str, dark: bool) -> egui::Label {
+    egui::Label::new(egui::RichText::new(text).color(body_color(dark))).selectable(true)
+}
+
+/// High-contrast body text color for the current theme.
+fn body_color(dark: bool) -> egui::Color32 {
+    if dark {
+        egui::Color32::from_gray(240)
+    } else {
+        egui::Color32::from_gray(20)
+    }
 }
 
 fn render_tool(ui: &mut egui::Ui, tool: &ToolBlock) {
