@@ -180,6 +180,155 @@ fn extract_user_text(content: &Value) -> Option<String> {
     }
 }
 
+/// Phase 10.13 (2026-06-11): replay an existing jsonl session log
+/// into a fresh `ChatHistory`. claude `--resume` re-attaches the
+/// model context, but does NOT re-emit past turns over the
+/// stream-json pipe — the chat pane would otherwise look empty
+/// even after a successful resume. By reading the jsonl ourselves
+/// we can present the conversation that the model is now sitting
+/// on top of.
+///
+/// We tolerate every kind of stray line claude has been observed to
+/// write (system events, partial deltas, tool-result variants); we
+/// take whatever maps cleanly onto our `ChatMessage` shape and
+/// silently skip the rest.
+pub fn replay_session_into(history: &mut crate::chat::history::ChatHistory, jsonl_path: &Path) {
+    let Ok(content) = fs::read_to_string(jsonl_path) else {
+        return;
+    };
+    for line in content.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        apply_jsonl_line(history, &value);
+    }
+}
+
+fn apply_jsonl_line(history: &mut crate::chat::history::ChatHistory, value: &Value) {
+    use crate::chat::history::ToolBlock;
+    let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "user" => {
+            // user-side content can be either plain text (string
+            // form) or a content-block array. tool_result blocks
+            // get plumbed into the most recent assistant message
+            // so the back-and-forth shape matches the live chat.
+            let Some(content) = value.get("message").and_then(|m| m.get("content")) else {
+                return;
+            };
+            if let Some(s) = content.as_str() {
+                if !s.trim().is_empty() {
+                    history.push_user(s.to_string());
+                }
+                return;
+            }
+            if let Some(arr) = content.as_array() {
+                let mut text = String::new();
+                for block in arr {
+                    let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+                    match block_type {
+                        "text" => {
+                            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                if !text.is_empty() {
+                                    text.push('\n');
+                                }
+                                text.push_str(t);
+                            }
+                        }
+                        "tool_result" => {
+                            let id = block
+                                .get("tool_use_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            let output = tool_result_text(block);
+                            if !id.is_empty() {
+                                history.record_tool_result(id, output);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if !text.trim().is_empty() {
+                    history.push_user(text);
+                }
+            }
+        }
+        "assistant" => {
+            let Some(content) = value.get("message").and_then(|m| m.get("content")) else {
+                return;
+            };
+            let Some(arr) = content.as_array() else {
+                return;
+            };
+            let mut text = String::new();
+            let mut tools: Vec<ToolBlock> = Vec::new();
+            for block in arr {
+                let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+                match block_type {
+                    "text" => {
+                        if let Some(t) = block.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(t);
+                        }
+                    }
+                    "tool_use" => {
+                        tools.push(ToolBlock {
+                            id: block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            name: block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            input: block.get("input").cloned().unwrap_or(Value::Null),
+                            output: None,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            history.replace_assistant_text(
+                value
+                    .get("message")
+                    .and_then(|m| m.get("id"))
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                text,
+            );
+            for tool in tools {
+                history.push_tool_use(tool);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn tool_result_text(block: &Value) -> String {
+    if let Some(s) = block.get("content").and_then(Value::as_str) {
+        return s.to_string();
+    }
+    if let Some(arr) = block.get("content").and_then(Value::as_array) {
+        let mut buf = String::new();
+        for sub in arr {
+            if sub.get("type").and_then(Value::as_str) == Some("text") {
+                if let Some(t) = sub.get("text").and_then(Value::as_str) {
+                    if !buf.is_empty() {
+                        buf.push('\n');
+                    }
+                    buf.push_str(t);
+                }
+            }
+        }
+        return buf;
+    }
+    String::new()
+}
+
 /// Cap preview text at ~120 chars and append an ellipsis when
 /// truncated. Operates on chars (not bytes) so multibyte
 /// characters aren't split.

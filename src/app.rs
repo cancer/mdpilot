@@ -230,6 +230,15 @@ impl App {
             "タブ 1".to_string(),
             resume,
         );
+        // Phase 10.13: F-11 auto-resume も jsonl 履歴を読み込んで
+        // chat ペインに反映 (open_tab_resuming と同じ理由)。
+        if let Some(resume_session) = resume {
+            if let Some(base) = directories::BaseDirs::new() {
+                let dir = history_picker::project_session_dir(base.home_dir(), &project.root);
+                let jsonl = dir.join(format!("{}.jsonl", resume_session.session_id));
+                history_picker::replay_session_into(&mut initial_tab.chat, &jsonl);
+            }
+        }
         // Surface the project-watcher startup error on the initial
         // tab's banner if it has no error of its own (the tab's own
         // FileWatcher::start may also have failed).
@@ -347,7 +356,7 @@ impl App {
                 }
             })
             .unwrap_or_default();
-        let tab = Tab::new(
+        let mut tab = Tab::new(
             &self.ctx,
             &self.project_root,
             initial_preview,
@@ -355,6 +364,18 @@ impl App {
             label,
             Some(ResumeSession { session_id }),
         );
+        // Phase 10.13 (2026-06-11): repopulate chat history from
+        // claude's jsonl log. claude --resume re-loads the model
+        // context but does not re-emit past turns over the stream-
+        // json transport, so the chat pane otherwise looks empty
+        // even after a successful resume. Best-effort: any read /
+        // parse failure leaves history empty (degrading to the old
+        // behavior).
+        if let Some(base) = directories::BaseDirs::new() {
+            let dir = history_picker::project_session_dir(base.home_dir(), &self.project_root);
+            let jsonl = dir.join(format!("{session_id}.jsonl"));
+            history_picker::replay_session_into(&mut tab.chat, &jsonl);
+        }
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.last_window_title.clear();
