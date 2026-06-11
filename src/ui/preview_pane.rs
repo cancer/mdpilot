@@ -56,37 +56,30 @@ pub fn show(
         follow_action: FollowAction::None,
         tree_exit_to_preview: false,
     };
+    // Phase 10.16 (2026-06-11): tree と preview を独立した scroll
+    // region に分離するため、`Panel::left` ベースに切り替え。
+    // 旧 `horizontal_top` レイアウトでは tree の ScrollArea が
+    // preview pane 上の hover を奪ってしまい、preview がマウス
+    // ホイールで動かない問題があった。
     if tree_open {
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(FILE_TREE_WIDTH, ui.available_height()),
-                egui::Layout::top_down(egui::Align::LEFT),
-                |ui| match file_tree::show(ui, project_root, tree_state) {
+        egui::Panel::left("preview_file_tree")
+            .resizable(false)
+            .default_size(FILE_TREE_WIDTH)
+            .show_inside(ui, |ui| {
+                match file_tree::show(ui, project_root, tree_state) {
                     FileTreeAction::Open(path) => outcome.open_file = Some(path),
                     FileTreeAction::ExitToPreview => outcome.tree_exit_to_preview = true,
                     FileTreeAction::None => {}
-                },
-            );
-            ui.separator();
-            ui.vertical(|ui| {
-                if let Some(path) = follow_prompt {
-                    outcome.follow_action = show_follow_banner(ui, path);
                 }
-                if conflict_detected {
-                    outcome.conflict_action = show_conflict_banner(ui);
-                }
-                crate::preview::render::show(ui, state);
             });
-        });
-    } else {
-        if let Some(path) = follow_prompt {
-            outcome.follow_action = show_follow_banner(ui, path);
-        }
-        if conflict_detected {
-            outcome.conflict_action = show_conflict_banner(ui);
-        }
-        crate::preview::render::show(ui, state);
     }
+    if let Some(path) = follow_prompt {
+        outcome.follow_action = show_follow_banner(ui, path);
+    }
+    if conflict_detected {
+        outcome.conflict_action = show_conflict_banner(ui);
+    }
+    crate::preview::render::show(ui, state);
     outcome
 }
 

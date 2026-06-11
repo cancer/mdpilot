@@ -30,12 +30,20 @@ use crate::vim::{Mode as VimMode, VimEngine};
 #[derive(Debug)]
 pub struct EditorState {
     pub vim: VimEngine,
+    /// Phase 10.16 (2026-06-11): set by `App` whenever the most
+    /// recent vim event moved the cursor (motion or edit). The
+    /// next render reads + clears it so the active cursor row
+    /// gets `scroll_to_me`'d into the viewport. Without this the
+    /// preview's `ScrollArea` never follows j/k off-screen or
+    /// trailing newlines past the bottom edge.
+    pub scroll_to_cursor: bool,
 }
 
 impl EditorState {
     pub fn from_document(doc: &LoadedDocument) -> Self {
         Self {
             vim: VimEngine::new(doc.text.clone()),
+            scroll_to_cursor: true,
         }
     }
 
@@ -166,10 +174,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut PreviewState) {
             // The LoadedDocument.text stays untouched as the
             // "originally loaded from disk" reference; keystroke save
             // (Phase 10.4) will sync them.
+            let scroll_request = std::mem::take(&mut editor.scroll_to_cursor);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    show_source_grid(ui, editor.vim.buffer(), theme_name, Some(editor));
+                    show_source_grid(
+                        ui,
+                        editor.vim.buffer(),
+                        theme_name,
+                        Some(editor),
+                        scroll_request,
+                    );
                 });
             // Phase 10.6: search prompt strip lives at the bottom
             // of the pane while `/` input is active. We render it
@@ -305,6 +320,7 @@ fn show_source_grid(
     source: &str,
     theme_name: &str,
     editor: Option<&EditorState>,
+    scroll_to_cursor: bool,
 ) {
     let syntax = markdown_syntax();
     let theme = theme_for(theme_name);
@@ -540,6 +556,15 @@ fn show_source_grid(
                             );
                             ui.painter().rect_filled(cursor_bar, 0.0, cursor_color);
                         }
+                        // Phase 10.16: keep the active line on
+                        // screen. We only do this when the host
+                        // explicitly asked (= cursor moved this
+                        // frame); otherwise the ScrollArea would
+                        // snap back every paint and the user
+                        // couldn't mouse-scroll away.
+                        if scroll_to_cursor {
+                            body_resp.scroll_to_me(Some(egui::Align::Center));
+                        }
                     }
                 }
                 let _ = body_resp;
@@ -772,7 +797,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                show_source_grid(ui, "# Title\n\nbody\n", SYNTAX_THEME_DARK, None);
+                show_source_grid(ui, "# Title\n\nbody\n", SYNTAX_THEME_DARK, None, false);
             });
         });
     }
@@ -782,7 +807,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                show_source_grid(ui, "", SYNTAX_THEME_DARK, None);
+                show_source_grid(ui, "", SYNTAX_THEME_DARK, None, false);
             });
         });
     }
@@ -792,7 +817,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                show_source_grid(ui, "hello\n", SYNTAX_THEME_LIGHT, None);
+                show_source_grid(ui, "hello\n", SYNTAX_THEME_LIGHT, None, false);
             });
         });
     }
