@@ -65,10 +65,15 @@ pub(crate) fn unique_line_range(selection: &str, source: &str) -> Option<(u32, u
         return None;
     }
     let first = source.find(selection)?;
-    let second_candidate_start = first + 1;
-    if second_candidate_start <= source.len()
-        && source[second_candidate_start..].contains(selection)
-    {
+    // Bug fix (2026-06-11): the previous `first + 1` offset was not
+    // guaranteed to land on a UTF-8 char boundary, so the
+    // `source[second_candidate_start..]` slice panicked on multibyte
+    // text (CJK in particular). Searching after the end of the first
+    // match avoids the boundary problem and is fine even when the
+    // selection contains repeating characters, because vim hands us
+    // contiguous regions rather than overlapping ones.
+    let after_first = first + selection.len();
+    if after_first <= source.len() && source[after_first..].contains(selection) {
         return None;
     }
     let start_line = 1 + source[..first].bytes().filter(|b| *b == b'\n').count() as u32;
@@ -126,6 +131,22 @@ mod tests {
         // Selecting "important" from `**important**` source.
         let source = "para with **important** word\n";
         assert_eq!(unique_line_range("important", source), Some((1, 1)));
+    }
+
+    #[test]
+    fn unique_line_range_handles_cjk_without_panic() {
+        // Regression for 2026-06-11 crash: `first + 1` after `find`
+        // landed inside a multibyte sequence, panicking the slice.
+        let source = "前文\nあい\n後文\n";
+        assert_eq!(unique_line_range("あい", source), Some((2, 2)));
+    }
+
+    #[test]
+    fn unique_line_range_returns_none_on_repeated_cjk() {
+        // Same multibyte selection appearing twice → ambiguous, no
+        // line range. Must not panic on the second-search slice.
+        let source = "ほげ\nふが\nほげ\n";
+        assert_eq!(unique_line_range("ほげ", source), None);
     }
 
     #[test]
