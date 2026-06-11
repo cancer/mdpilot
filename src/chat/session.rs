@@ -53,14 +53,36 @@ impl ChatSession {
         F: Fn() + Send + 'static,
     {
         let args = build_args(&opts);
-        let mut child = Command::new("claude")
+        // Phase 8.1 (bundle 起動 fix, 2026-06-11): Finder / Dock 経由
+        // で `.app` を起動すると launchd のデフォルト PATH
+        // (`/usr/bin:/bin:/usr/sbin:/sbin`) だけが渡され、login shell
+        // の PATH を引き継がない。`claude` は fnm / nvm / homebrew
+        // / volta などの user-local パスにいるのが大半なので、
+        // `posix_spawnp` の名前解決が失敗する。
+        //
+        // 対処: `$SHELL -ilc 'echo $PATH'` で login shell の PATH を
+        // 取り、その中から claude の絶対パスを探して `Command::new`
+        // に渡す。env にも同じ PATH を流し込んで、claude 自身が起動
+        // する node などのサブプロセスでも環境が揃うようにする。
+        // 解決できなかった場合は "claude" のままにして、エラーメッ
+        // セージで `which claude` を案内する。
+        let resolved_path = resolve_login_path();
+        let claude_path = find_claude_executable(resolved_path.as_deref());
+        let mut command = match claude_path.as_deref() {
+            Some(p) => Command::new(p),
+            None => Command::new("claude"),
+        };
+        command
             .args(&args)
             .current_dir(&opts.project_root)
             .env("MDPILOT_PROJECT_ROOT", &opts.project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        if let Some(path) = resolved_path {
+            command.env("PATH", path);
+        }
+        let mut child = command.spawn()?;
 
         // claude's stdout is the stream-json transport. Parsing happens on a
         // dedicated thread so the UI thread never blocks on read().
@@ -191,6 +213,76 @@ fn terminate_polite(child: &Child) {
 fn terminate_polite(_child: &Child) {
     // No SIGTERM equivalent on Windows; the Drop loop falls through to
     // Child::kill() after the grace period.
+}
+
+/// Phase 8.1 helper: walk `path` (colon-separated) and return the
+/// first directory that contains an executable named `claude`.
+/// Falls back to `None` if no entry matches; the caller then leaves
+/// `Command::new("claude")` alone so the spawn failure surfaces a
+/// clean "claude not found" error to the user.
+pub(crate) fn find_claude_executable(path: Option<&str>) -> Option<PathBuf> {
+    let path = path?;
+    for dir in path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = std::path::Path::new(dir).join("claude");
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
+}
+
+/// Phase 8.1 (Finder/Dock launch fix, 2026-06-11): when the user
+/// double-clicks the `.app` from Finder or launches via Dock, the
+/// process inherits launchd's PATH (`/usr/bin:/bin:/usr/sbin:/sbin`)
+/// instead of the shell's. `claude` is almost always installed under
+/// something the user's login shell sets up (fnm / nvm / Homebrew /
+/// volta), so spawn fails with "No such file or directory" until we
+/// re-resolve PATH by asking the user's login shell.
+///
+/// Strategy: run `$SHELL -ilc 'echo -n $PATH'` once and cache the
+/// result. The `-i` makes zsh / bash read interactive rc files
+/// (where Homebrew + fnm shims usually live). If the call fails
+/// (no SHELL, shell missing, timeout, …) we return `None` and the
+/// caller falls back to the inherited PATH.
+pub(crate) fn resolve_login_path() -> Option<String> {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Option<String>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let shell = std::env::var_os("SHELL")?;
+            let output = std::process::Command::new(&shell)
+                .arg("-ilc")
+                .arg("printf %s \"$PATH\"")
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let raw = String::from_utf8(output.stdout).ok()?;
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .clone()
 }
 
 /// Serialize a single user message in the stream-json input contract (see
@@ -403,5 +495,54 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(s.trim_end()).unwrap();
         assert_eq!(parsed["message"]["content"], "こんにちは");
+    }
+
+    // ---- Phase 8.1: find_claude_executable ----
+
+    #[test]
+    fn find_claude_executable_returns_none_for_no_path() {
+        assert_eq!(find_claude_executable(None), None);
+    }
+
+    #[test]
+    fn find_claude_executable_returns_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let path = format!("{}:{}", dir.path().display(), other.path().display());
+        assert_eq!(find_claude_executable(Some(&path)), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_claude_executable_finds_first_match() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = bin.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        let path = format!("/nonexistent:{}", dir.path().display());
+        assert_eq!(find_claude_executable(Some(&path)), Some(bin));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_claude_executable_skips_non_executable_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("claude");
+        // 0o644: readable but not executable — should not match.
+        std::fs::write(&bin, "not a binary").unwrap();
+        let path = format!("{}", dir.path().display());
+        assert_eq!(find_claude_executable(Some(&path)), None);
+    }
+
+    #[test]
+    fn find_claude_executable_handles_empty_segments() {
+        // PATHs from real shells sometimes have empty segments
+        // (`:/usr/bin:`); we must not panic or treat them as cwd.
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!("::{}", dir.path().display());
+        assert_eq!(find_claude_executable(Some(&path)), None);
     }
 }

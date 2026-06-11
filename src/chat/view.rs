@@ -256,10 +256,25 @@ fn render_system(ui: &mut egui::Ui, system: &SystemMessage) {
             );
         }
         SystemMessage::SpawnFailed { error } => {
+            // Phase 8.1 (2026-06-11): claude CLI が見つからないケース
+            // (Finder 起動 + PATH 不足 / 未インストール) はユーザー側で
+            // 解決が必要なので、行動可能なメッセージに改善する。
+            let not_found = error.contains("No such file or directory")
+                || error.contains("not found")
+                || error.contains("os error 2");
+            let body = if not_found {
+                format!(
+                    "Claude CLI が見つかりませんでした ({error})。\n\
+                     mdpilot は別途インストールした `claude` コマンドを呼び出します。\n\
+                     インストール手順: https://docs.claude.com/claude-code\n\
+                     ターミナルで `which claude` が成功することを確認し、mdpilot を再起動してください。"
+                )
+            } else {
+                format!("Claude を起動できませんでした: {error}")
+            };
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(format!("Claude を起動できませんでした: {error}"))
-                        .color(egui::Color32::from_rgb(220, 90, 80)),
+                    egui::RichText::new(body).color(egui::Color32::from_rgb(220, 90, 80)),
                 )
                 .selectable(true),
             );
