@@ -64,10 +64,7 @@ pub fn show(
                 ui.separator();
             }
             if sessions.is_empty() {
-                ui.label(
-                    "復元可能なセッションは見つかりませんでした。\
-                     一度起動して .md を開いたセッションが対象です。",
-                );
+                ui.label("このプロジェクトでの過去セッションは見つかりませんでした。");
                 return;
             }
             ui.weak("j/k: 移動  Enter: 再開  Esc: 閉じる");

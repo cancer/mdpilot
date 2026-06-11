@@ -273,36 +273,22 @@ impl App {
     /// (dozens of files at most) finishes in microseconds; we
     /// don't need a background thread.
     ///
-    /// Phase 9.X.3: results are filtered down to sessions for
-    /// which mdpilot has recorded a preview path. Older sessions
-    /// (created before mdpilot started persisting previews, or
-    /// purely conversational sessions where the user never opened
-    /// a document) would resume with an empty preview, which is
-    /// confusing — better to omit them from the list entirely.
+    /// Listing policy (revised 2026-06-11): show *every* claude
+    /// session for this project. Sessions that have an associated
+    /// preview file in `session_previews` reopen that file on resume
+    /// (Phase 9.X.3 path); sessions without one resume the chat into
+    /// an empty preview. Filtering by `session_previews` was rolled
+    /// back per user request.
     fn open_session_picker(&mut self) {
-        let known_session_ids: std::collections::HashSet<String> = self
-            .session_store_path
-            .as_ref()
-            .map(|path| {
-                SessionStore::load_or_default(path)
-                    .session_previews
-                    .keys()
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
         let data = match directories::BaseDirs::new() {
             Some(base) => {
                 let dir = history_picker::project_session_dir(base.home_dir(), &self.project_root);
                 match history_picker::list_sessions(&dir) {
-                    Ok(mut sessions) => {
-                        sessions.retain(|s| known_session_ids.contains(&s.session_id.to_string()));
-                        SessionPickerData {
-                            sessions,
-                            error: None,
-                            state: Default::default(),
-                        }
-                    }
+                    Ok(sessions) => SessionPickerData {
+                        sessions,
+                        error: None,
+                        state: Default::default(),
+                    },
                     Err(err) => SessionPickerData {
                         sessions: Vec::new(),
                         error: Some(err.to_string()),
