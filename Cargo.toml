@@ -55,3 +55,21 @@ tempfile = "3"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Phase 8.1 / Phase 10 release bundle (2026-06-11): `cargo bundle
+# --release` reads this section to build a macOS `.app`. Identifier
+# follows the AppPaths::resolve scheme (`dev.mdpilot.mdpilot`) so
+# config / data / cache dirs stay consistent between dev-builds and
+# bundled installs.
+[package.metadata.bundle]
+name = "mdpilot"
+identifier = "dev.mdpilot.mdpilot"
+short_description = "Markdown editor paired with Claude Code"
+long_description = """
+mdpilot is a native GUI app that pairs a vim-style markdown editor
+with a Claude Code chat session, so you can edit and consult an AI
+side-by-side without leaving your keyboard.
+"""
+category = "DeveloperTool"
+copyright = "Copyright (c) 2026 cancer"
+osx_minimum_system_version = "11.0"
