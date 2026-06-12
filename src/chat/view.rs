@@ -77,6 +77,27 @@ fn input_row(
     ui.horizontal_top(|ui| {
         let buttons_width = 88.0;
         let input_width = (ui.available_width() - buttons_width).max(160.0);
+        let in_flight = history.in_flight;
+
+        // Phase 10.21: Consume Enter / Esc BEFORE the TextEdit
+        // renders. egui's TextEdit reads from `i.events` during
+        // `ui.add`, so removing the events *after* the add was a
+        // no-op — the Text("\n") had already been written into
+        // `history.input`. Pre-consume here, then render.
+        // Focus check via `ctx.memory()` instead of `editor.has_focus()`
+        // because we don't have the Response yet.
+        let chat_focused = ui
+            .ctx()
+            .memory(|m| m.focused() == Some(chat_input_id()));
+        let mut enter_pressed = false;
+        let mut abort_via_key = false;
+        if chat_focused {
+            enter_pressed = ui.input_mut(|i| extract_send_enter(&mut i.events));
+            if in_flight {
+                abort_via_key = ui.input_mut(|i| extract_abort_escape(&mut i.events));
+            }
+        }
+
         let editor = ui.add_sized(
             [input_width, 60.0],
             egui::TextEdit::multiline(&mut history.input)
@@ -85,21 +106,8 @@ fn input_row(
                 .hint_text("プロンプトを入力… (Enter で送信、Shift+Enter で改行)"),
         );
 
-        let in_flight = history.in_flight;
         let can_send = !in_flight && session_alive && !history.input.trim().is_empty();
-
-        // Plain Enter submits; Shift+Enter falls through. Esc aborts
-        // when chat has focus and a turn is in flight (Phase 10.14).
-        let mut submit = false;
-        let mut abort_via_key = false;
-        if editor.has_focus() {
-            if ui.input_mut(|i| extract_send_enter(&mut i.events)) && can_send {
-                submit = true;
-            }
-            if in_flight && ui.input_mut(|i| extract_abort_escape(&mut i.events)) {
-                abort_via_key = true;
-            }
-        }
+        let mut submit = enter_pressed && can_send;
 
         ui.vertical(|ui| {
             // Phase 10.14: Send and Abort are mutually exclusive —
