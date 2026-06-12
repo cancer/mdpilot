@@ -18,6 +18,13 @@ pub struct ChatHistory {
     /// button while this flag is set so the user can cut claude
     /// off when it's running on tangents.
     pub in_flight: bool,
+    /// Phase 10.26: one-shot request from `input_row` to the
+    /// ScrollArea — set to true on submit, consumed (cleared) the
+    /// next frame the chat view renders. Forces a jump to the
+    /// bottom of the transcript regardless of where the user had
+    /// scrolled, so the message they just sent (and the incoming
+    /// reply) is in view.
+    pub scroll_to_bottom_pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

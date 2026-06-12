@@ -64,6 +64,15 @@ pub fn show(
                 render_message(ui, message);
                 ui.add_space(8.0);
             }
+            // Phase 10.26: one-shot scroll-to-bottom after the user
+            // submits. `stick_to_bottom` only holds the bottom if
+            // already there; if the user had scrolled up to read
+            // backlog, sending a new prompt should still pull the
+            // view back down so they see what they just said.
+            if history.scroll_to_bottom_pending {
+                ui.scroll_to_cursor(Some(egui::Align::Max));
+                history.scroll_to_bottom_pending = false;
+            }
         });
 }
 
@@ -132,6 +141,7 @@ fn input_row(
             let text = history.input.trim().to_string();
             history.input.clear();
             history.in_flight = true;
+            history.scroll_to_bottom_pending = true;
             editor.request_focus();
             on_send(text);
         } else if abort_via_key {
