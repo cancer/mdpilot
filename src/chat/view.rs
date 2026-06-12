@@ -235,7 +235,10 @@ fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
             tools,
             message_id: _,
         } => {
-            ui.add(header_label("Assistant", dark));
+            // Phase 10.24: drop the "Assistant" header too. The
+            // User bubble's tint already establishes the speaker
+            // contrast — Assistant is the default "plain text +
+            // high contrast" branch, so no label is needed.
             if !text.is_empty() {
                 ui.add(body_label(text, dark));
             }
@@ -267,13 +270,6 @@ fn user_text_color(dark: bool) -> egui::Color32 {
     } else {
         egui::Color32::from_gray(90)
     }
-}
-
-/// "User" / "Assistant" / "Input" / "Output" — structural markers. Non-
-/// selectable so dragging across messages copies just the bodies, not the
-/// role prefix. The user pays the same Cmd+C and gets a clean transcript.
-fn header_label(text: &str, dark: bool) -> egui::Label {
-    egui::Label::new(egui::RichText::new(text).strong().color(body_color(dark))).selectable(false)
 }
 
 /// Message body text — explicitly selectable so the F-05 contract doesn't
