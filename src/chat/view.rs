@@ -203,8 +203,24 @@ fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
     let dark = ui.style().visuals.dark_mode;
     match message {
         ChatMessage::User { text } => {
-            ui.add(header_label("User", dark));
-            ui.add(body_label(text, dark));
+            // Phase 10.18: User messages get a subtle tinted Frame
+            // and a muted text color so Assistant's reply (which
+            // keeps the high-contrast body_color) is the visually
+            // dominant element. Per user direction: User's contrast
+            // doesn't need to be as high as Assistant's.
+            egui::Frame::new()
+                .fill(user_bubble_bg(dark))
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    let color = user_text_color(dark);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new("User").strong().color(color))
+                            .selectable(false),
+                    );
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text).color(color)).selectable(true),
+                    );
+                });
         }
         ChatMessage::Assistant {
             text,
@@ -220,6 +236,28 @@ fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
             }
         }
         ChatMessage::System(system) => render_system(ui, system),
+    }
+}
+
+/// Phase 10.18: subtle background tint for the User bubble. Alpha is
+/// kept low so the Frame reads as "different region" rather than
+/// "callout box" — Assistant should stay the focal point.
+fn user_bubble_bg(dark: bool) -> egui::Color32 {
+    if dark {
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 14)
+    } else {
+        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 12)
+    }
+}
+
+/// Phase 10.18: deliberately lower-contrast than `body_color` so the
+/// User block recedes relative to Assistant. Sits roughly midway
+/// between the panel background and Assistant's body text.
+fn user_text_color(dark: bool) -> egui::Color32 {
+    if dark {
+        egui::Color32::from_gray(170)
+    } else {
+        egui::Color32::from_gray(90)
     }
 }
 
