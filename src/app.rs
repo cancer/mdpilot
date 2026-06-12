@@ -809,6 +809,13 @@ impl App {
         if self.file_tree_state.focused {
             return;
         }
+        // Phase 10.22 (2026-06-12): modal pickers own the keyboard
+        // while open. Without this guard, typing into the fuzzy
+        // finder triggers vim commands (e.g., 'a' = insert mode)
+        // and the modal's TextEdit never sees the keystroke.
+        if self.fuzzy_finder.is_some() || self.session_picker.is_some() {
+            return;
+        }
         let events: Vec<egui::Event> = ctx.input(|i| i.events.to_vec());
         if events.is_empty() {
             return;
