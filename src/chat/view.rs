@@ -75,9 +75,12 @@ fn input_row(
     on_abort: &mut dyn FnMut(),
 ) {
     ui.horizontal_top(|ui| {
-        let buttons_width = 88.0;
-        let input_width = (ui.available_width() - buttons_width).max(160.0);
         let in_flight = history.in_flight;
+        // Phase 10.25: 送信ボタンを撤廃。中断は in_flight のとき
+        // だけ右側に出す。idle 中はボタン領域もゼロにして input が
+        // 横幅をフル活用できるようにする。
+        let buttons_width = if in_flight { 88.0 } else { 0.0 };
+        let input_width = (ui.available_width() - buttons_width).max(160.0);
 
         // Phase 10.21: Consume Enter / Esc BEFORE the TextEdit
         // renders. egui's TextEdit reads from `i.events` during
@@ -106,14 +109,15 @@ fn input_row(
                 .hint_text("プロンプトを入力… (Enter で送信、Shift+Enter で改行)"),
         );
 
-        let can_send = !in_flight && session_alive && !history.input.trim().is_empty();
-        let mut submit = enter_pressed && can_send;
+        // Phase 10.25: in_flight でも送信可能にする。claude CLI が
+        // 同一セッションの stdin への追加 user message を受け付ける
+        // 想定。デルタの混線リスクは認識しているがユーザーの
+        // 「送信も中断もどちらも可能であるべき」指示を優先。
+        let can_send = session_alive && !history.input.trim().is_empty();
+        let submit = enter_pressed && can_send;
 
-        ui.vertical(|ui| {
-            // Phase 10.14: Send and Abort are mutually exclusive —
-            // exactly one of them is rendered each frame so the user
-            // can't accidentally double-fire.
-            if in_flight {
+        if in_flight {
+            ui.vertical(|ui| {
                 if ui
                     .button("中断")
                     .on_hover_text("Esc でも中断できます")
@@ -121,20 +125,13 @@ fn input_row(
                 {
                     abort_via_key = true;
                 }
-            } else if ui
-                .add_enabled(can_send, egui::Button::new("送信"))
-                .clicked()
-            {
-                submit = true;
-            }
-        });
+            });
+        }
 
         if submit {
             let text = history.input.trim().to_string();
             history.input.clear();
             history.in_flight = true;
-            // Keep focus on the input so the user can keep typing without
-            // clicking back into the field.
             editor.request_focus();
             on_send(text);
         } else if abort_via_key {

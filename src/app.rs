@@ -1518,7 +1518,20 @@ impl eframe::App for App {
         }
 
         if let Some(text) = send_text {
-            tab.handle_send(text);
+            // Phase 10.25: mid-stream Enter implicitly aborts the
+            // current turn so the new turn starts cleanly. Without
+            // this, the still-streaming deltas of turn1 would land
+            // in the empty Assistant placeholder we'd push for
+            // turn2 — message_id-based routing isn't implemented,
+            // so the cheapest robust behavior is "interject ⇒
+            // abandon the in-flight turn".
+            let was_in_flight = tab.chat.in_flight;
+            if was_in_flight {
+                let ctx = ui.ctx().clone();
+                let root = self.project_root.clone();
+                self.active_mut().abort_current_turn(&ctx, &root);
+            }
+            self.active_mut().handle_send(text);
         }
         // Phase 10.14: dispatch abort *after* the layout borrow ends
         // so we can grab the project_root via `self`.
