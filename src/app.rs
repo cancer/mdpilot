@@ -163,9 +163,10 @@ enum ChatQuoteState {
 }
 
 /// Phase 10.3 (revised): the 2 or 3 panes the user can cycle focus
-/// through with Cmd+H / Cmd+L (Phase 10.20: pane navigation is
-/// horizontal, so h/l matches the vim mental model better than the
-/// previous Cmd+J / Cmd+K).
+/// through with Cmd+Shift+H / Cmd+Shift+L. Phase 10.20: pane
+/// navigation is horizontal so h/l fits vim's mental model better
+/// than the previous Cmd+J / Cmd+K, and Shift dodges macOS's
+/// Cmd+H ("hide app") system shortcut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusedPane {
     Preview,
@@ -733,13 +734,14 @@ impl App {
     }
 
     /// Phase 10.20 (was 10.3): pane focus cycle.
-    /// `Cmd+H` cycles **backward** / leftward (Tree ← Preview ← Chat),
-    /// `Cmd+L` cycles **forward** / rightward  (Tree → Preview → Chat).
+    /// `Cmd+Shift+H` cycles **backward** / leftward (Tree ← Preview ← Chat),
+    /// `Cmd+Shift+L` cycles **forward** / rightward  (Tree → Preview → Chat).
     /// Tree is only included when the sidebar is open. h/l mirrors
     /// vim's horizontal motion since the panes are arranged
-    /// horizontally on screen.
+    /// horizontally; Shift avoids macOS's Cmd+H "hide app".
     fn consume_focus_preview_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::H);
+        let modifiers = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        let shortcut = egui::KeyboardShortcut::new(modifiers, egui::Key::H);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
             self.cycle_focus(ctx, false);
@@ -748,7 +750,8 @@ impl App {
     }
 
     fn consume_focus_chat_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::L);
+        let modifiers = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        let shortcut = egui::KeyboardShortcut::new(modifiers, egui::Key::L);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
             self.cycle_focus(ctx, true);
