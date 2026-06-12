@@ -50,6 +50,14 @@ pub enum ChatEvent {
     Unknown {
         event_type: String,
     },
+    /// Phase 10.19: a line from claude's stderr that looks like an
+    /// error message. Surfaces silent failures (missing API key,
+    /// auth, etc.) that claude doesn't otherwise put on the JSON
+    /// channel — without those, the chat just goes quiet and the
+    /// user has no idea why.
+    Stderr {
+        line: String,
+    },
 }
 
 /// Translate a single decoded JSON value into a `ChatEvent`. Returns
@@ -224,6 +232,48 @@ pub fn pipe_stdout_to_channel<R: BufRead, F: Fn()>(reader: R, sender: Sender<Cha
             }
         }
     }
+}
+
+/// Phase 10.19: drain claude's stderr. Every line goes to tracing
+/// (preserving the pre-10.19 debugging behavior), and lines that
+/// look like errors are *also* shipped to `sender` as
+/// `ChatEvent::Stderr` so the UI can surface them. Without this,
+/// fatal stderr messages (missing API key, auth failure) silently
+/// kill the turn and the user only sees an empty assistant bubble.
+pub fn pipe_stderr_to_channel<R: BufRead, F: Fn()>(
+    reader: R,
+    sender: Sender<ChatEvent>,
+    wake: F,
+) {
+    for line in reader.lines() {
+        match line {
+            Ok(line) => {
+                tracing::warn!(target: "claude::stderr", "{line}");
+                if looks_like_error(&line) {
+                    if sender.send(ChatEvent::Stderr { line }).is_err() {
+                        break;
+                    }
+                    wake();
+                }
+            }
+            Err(err) => {
+                tracing::warn!("error reading claude stderr: {err}");
+                break;
+            }
+        }
+    }
+}
+
+/// Heuristic — true if the stderr line looks like something the
+/// user should know about. Case-insensitive substring match on the
+/// usual suspects; we err on the side of forwarding to the UI
+/// because silent failures are the bug we're fixing here.
+pub(crate) fn looks_like_error(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("error")
+        || lower.contains("fatal")
+        || lower.contains("panic")
+        || lower.contains("unauthor")
 }
 
 #[cfg(test)]
@@ -422,5 +472,23 @@ mod tests {
             2,
             "wake should fire once per successful send, not on blank/garbage lines",
         );
+    }
+
+    #[test]
+    fn looks_like_error_catches_the_usual_suspects() {
+        assert!(looks_like_error("Error: ANTHROPIC_API_KEY is not set"));
+        assert!(looks_like_error("error connecting to api.anthropic.com"));
+        assert!(looks_like_error("FATAL: out of memory"));
+        assert!(looks_like_error("thread 'main' panicked at..."));
+        assert!(looks_like_error("HTTP 401 Unauthorized"));
+        assert!(looks_like_error("Unauthorised request"));
+    }
+
+    #[test]
+    fn looks_like_error_skips_innocuous_lines() {
+        assert!(!looks_like_error(""));
+        assert!(!looks_like_error("starting up..."));
+        assert!(!looks_like_error("[info] using model claude-opus"));
+        assert!(!looks_like_error("checking auth"));
     }
 }

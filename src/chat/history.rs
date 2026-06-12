@@ -56,6 +56,11 @@ pub enum SystemMessage {
     ResultError { subtype: String },
     /// claude child process exited while a response was in flight.
     Disconnected,
+    /// Phase 10.19: a stderr line from `claude` that matched the
+    /// error heuristic (`stream::looks_like_error`). We surface
+    /// these in chat so silent failures (missing API key, auth
+    /// errors) stop being invisible to the user.
+    StderrError { line: String },
     /// `ChatSession::start` failed (e.g. `claude` not on `$PATH`).
     SpawnFailed { error: String },
 }
@@ -178,6 +183,9 @@ impl ChatHistory {
                 // Phase 10.14: result closes the turn; flip the
                 // Send/Abort toggle back to Send.
                 self.in_flight = false;
+            }
+            ChatEvent::Stderr { line } => {
+                self.push_system(SystemMessage::StderrError { line });
             }
         }
     }
@@ -386,6 +394,20 @@ mod tests {
             h.messages.last(),
             Some(ChatMessage::System(SystemMessage::ResultError { .. }))
         ));
+    }
+
+    #[test]
+    fn apply_stderr_emits_system_message() {
+        let mut h = ChatHistory::default();
+        h.apply(ChatEvent::Stderr {
+            line: "Error: ANTHROPIC_API_KEY is not set".into(),
+        });
+        match h.messages.last() {
+            Some(ChatMessage::System(SystemMessage::StderrError { line })) => {
+                assert_eq!(line, "Error: ANTHROPIC_API_KEY is not set");
+            }
+            other => panic!("expected StderrError, got {other:?}"),
+        }
     }
 
     #[test]

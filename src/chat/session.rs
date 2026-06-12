@@ -2,7 +2,7 @@
 // the struct fields and accessors look dead from the bin crate.
 #![allow(dead_code)]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::Sender;
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use crate::chat::stream::{pipe_stdout_to_channel, ChatEvent};
+use crate::chat::stream::{pipe_stderr_to_channel, pipe_stdout_to_channel, ChatEvent};
 
 /// Options for spawning the `claude` child process. The contract is pinned
 /// in `docs/chat.md` 2.1 and verified against an actual `claude` run in
@@ -50,7 +50,7 @@ impl ChatSession {
         wake_ui: F,
     ) -> std::io::Result<Self>
     where
-        F: Fn() + Send + 'static,
+        F: Fn() + Send + Sync + 'static,
     {
         let args = build_args(&opts);
         // Phase 8.1 (bundle 起動 fix, 2026-06-11): Finder / Dock 経由
@@ -84,20 +84,28 @@ impl ChatSession {
         }
         let mut child = command.spawn()?;
 
+        // Phase 10.19: share wake_ui between the stdout and stderr
+        // drain threads. Both need to ping the UI when they push
+        // an event, so wrap once and clone the Arc per thread.
+        let wake_ui = std::sync::Arc::new(wake_ui);
+
         // claude's stdout is the stream-json transport. Parsing happens on a
         // dedicated thread so the UI thread never blocks on read().
         let stdout_handle = child.stdout.take().map(|stdout| {
             let reader = BufReader::new(stdout);
-            thread::spawn(move || pipe_stdout_to_channel(reader, events_tx, wake_ui))
+            let tx = events_tx.clone();
+            let wake = wake_ui.clone();
+            thread::spawn(move || pipe_stdout_to_channel(reader, tx, move || wake()))
         });
 
-        // claude's stderr is a low-volume, human-readable log stream; pipe
-        // it into tracing so panics / API key errors / etc. surface in the
-        // application log. The thread exits when the child closes stderr,
-        // which happens after `kill()` in Drop.
+        // Phase 10.19: stderr also flows into the same chat channel
+        // so error lines (missing API key, auth, panic) surface in
+        // the UI instead of going only to the tracing log. Every
+        // line still goes to tracing for debugging.
         let stderr_handle = child.stderr.take().map(|stderr| {
             let reader = BufReader::new(stderr);
-            thread::spawn(move || pipe_lines_to_tracing(reader))
+            let wake = wake_ui.clone();
+            thread::spawn(move || pipe_stderr_to_channel(reader, events_tx, move || wake()))
         });
 
         let stdin = child.stdin.take();
@@ -299,21 +307,6 @@ pub(crate) fn write_user_message<W: Write>(writer: &mut W, text: &str) -> std::i
     Ok(())
 }
 
-/// Forward every line of `reader` to `tracing::warn` under the
-/// `claude::stderr` target. Reading is best-effort: read errors are logged
-/// and end the drain. Returns when the reader hits EOF.
-pub(crate) fn pipe_lines_to_tracing<R: BufRead>(reader: R) {
-    for line in reader.lines() {
-        match line {
-            Ok(line) => tracing::warn!(target: "claude::stderr", "{line}"),
-            Err(err) => {
-                tracing::warn!("error reading claude stderr: {err}");
-                break;
-            }
-        }
-    }
-}
-
 /// Assemble the CLI argument list for `claude`. Kept as a pure function so
 /// we can unit test the contract without spawning a process.
 ///
@@ -448,18 +441,37 @@ mod tests {
     }
 
     #[test]
-    fn pipe_lines_to_tracing_drains_until_eof() {
-        let payload = b"first stderr line\nsecond line\n";
+    fn pipe_stderr_forwards_error_lines_to_channel() {
+        use std::sync::mpsc;
+        let payload = b"info: starting up\nError: ANTHROPIC_API_KEY is not set\nplain noise\n";
         let reader = std::io::Cursor::new(&payload[..]);
-        pipe_lines_to_tracing(reader);
-        // Just asserting that the function returns rather than blocking or
-        // panicking; tracing output isn't observable without a subscriber.
+        let (tx, rx) = mpsc::channel::<ChatEvent>();
+        let woke = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let woke_c = woke.clone();
+        pipe_stderr_to_channel(reader, tx, move || {
+            woke_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let events: Vec<ChatEvent> = rx.try_iter().collect();
+        assert_eq!(
+            events,
+            vec![ChatEvent::Stderr {
+                line: "Error: ANTHROPIC_API_KEY is not set".to_string(),
+            }],
+            "only the error line should reach the channel",
+        );
+        assert_eq!(
+            woke.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "wake() must be called once per forwarded event",
+        );
     }
 
     #[test]
-    fn pipe_lines_to_tracing_returns_on_empty_input() {
+    fn pipe_stderr_returns_on_empty_input() {
+        use std::sync::mpsc;
         let reader = std::io::Cursor::new(&b""[..]);
-        pipe_lines_to_tracing(reader);
+        let (tx, _rx) = mpsc::channel::<ChatEvent>();
+        pipe_stderr_to_channel(reader, tx, || {});
     }
 
     #[test]

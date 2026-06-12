@@ -350,6 +350,19 @@ fn render_system(ui: &mut egui::Ui, system: &SystemMessage) {
                 .selectable(true),
             );
         }
+        SystemMessage::StderrError { line } => {
+            // Phase 10.19: claude wrote something error-looking to
+            // stderr. Render in the same red as ResultError but
+            // keep a `claude stderr:` prefix so the user can tell
+            // it's not a JSON-channel error.
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("claude stderr: {line}"))
+                        .color(egui::Color32::from_rgb(220, 90, 80)),
+                )
+                .selectable(true),
+            );
+        }
         SystemMessage::SpawnFailed { error } => {
             // Phase 8.1 (2026-06-11): claude CLI が見つからないケース
             // (Finder 起動 + PATH 不足 / 未インストール) はユーザー側で
