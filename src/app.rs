@@ -899,15 +899,25 @@ impl App {
                         .strip_prefix(&self.project_root)
                         .unwrap_or(&document.path);
                     let snippet = format!("@{}", rel.display());
-                    if !tab.chat.input.is_empty()
-                        && !tab.chat.input.ends_with(' ')
-                        && !tab.chat.input.ends_with('\n')
-                    {
-                        tab.chat.input.push(' ');
+                    // Phase 10.23: `@path` を独立した行で挿入し、
+                    // ユーザーが続きを **次の行** から書き始められる
+                    // ようカーソルを末尾 (= `@path` の直下) に移動。
+                    if !tab.chat.input.is_empty() && !tab.chat.input.ends_with('\n') {
+                        tab.chat.input.push('\n');
                     }
                     tab.chat.input.push_str(&snippet);
-                    tab.chat.input.push(' ');
-                    ctx.memory_mut(|m| m.request_focus(crate::chat::view::chat_input_id()));
+                    tab.chat.input.push('\n');
+                    let input_id = crate::chat::view::chat_input_id();
+                    let char_count = tab.chat.input.chars().count();
+                    let cursor_range = egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(char_count),
+                    );
+                    let mut state =
+                        egui::widgets::text_edit::TextEditState::load(ctx, input_id)
+                            .unwrap_or_default();
+                    state.cursor.set_char_range(Some(cursor_range));
+                    state.store(ctx, input_id);
+                    ctx.memory_mut(|m| m.request_focus(input_id));
                     self.file_tree_state.focused = false;
                 }
             }
