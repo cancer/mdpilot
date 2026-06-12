@@ -205,20 +205,20 @@ fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
         ChatMessage::User { text } => {
             // Phase 10.18: User messages get a subtle tinted Frame
             // and a muted text color so Assistant's reply (which
-            // keeps the high-contrast body_color) is the visually
-            // dominant element. Per user direction: User's contrast
-            // doesn't need to be as high as Assistant's.
+            // keeps the high-contrast body_color and the explicit
+            // "Assistant" header) is the visually dominant element.
+            // No header label here — the tint itself signals "this
+            // is User's turn", and dropping the text label keeps
+            // User maximally lightweight per the contrast direction.
             egui::Frame::new()
                 .fill(user_bubble_bg(dark))
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
-                    let color = user_text_color(dark);
                     ui.add(
-                        egui::Label::new(egui::RichText::new("User").strong().color(color))
-                            .selectable(false),
-                    );
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(text).color(color)).selectable(true),
+                        egui::Label::new(
+                            egui::RichText::new(text).color(user_text_color(dark)),
+                        )
+                        .selectable(true),
                     );
                 });
         }
