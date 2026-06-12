@@ -872,6 +872,31 @@ impl App {
                 ctx.memory_mut(|m| m.request_focus(crate::chat::view::chat_input_id()));
                 self.file_tree_state.focused = false;
             }
+            // Phase 10.17: Normal-mode `Y` (no selection) — drop an
+            // `@<relative path>` into chat input so claude knows
+            // which file the upcoming question is about. We get
+            // here only when preview is `Loaded` (feed_vim_events
+            // returned early otherwise), so document.path is safe
+            // to read.
+            if action.send_file_reference_to_chat {
+                if let PreviewStatus::Loaded { document, .. } = &tab.preview.status {
+                    let rel = document
+                        .path
+                        .strip_prefix(&self.project_root)
+                        .unwrap_or(&document.path);
+                    let snippet = format!("@{}", rel.display());
+                    if !tab.chat.input.is_empty()
+                        && !tab.chat.input.ends_with(' ')
+                        && !tab.chat.input.ends_with('\n')
+                    {
+                        tab.chat.input.push(' ');
+                    }
+                    tab.chat.input.push_str(&snippet);
+                    tab.chat.input.push(' ');
+                    ctx.memory_mut(|m| m.request_focus(crate::chat::view::chat_input_id()));
+                    self.file_tree_state.focused = false;
+                }
+            }
         }
         if any_buffer_change {
             // Phase 10.4: keystroke save. Frequency is bounded by the

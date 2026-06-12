@@ -478,3 +478,34 @@ fn search_backspace_deletes_from_prompt() {
     e.apply(VimEvent::Backspace);
     assert_eq!(e.search_prompt(), Some("f"));
 }
+
+#[test]
+fn normal_capital_y_requests_file_reference() {
+    // Phase 10.17: Normal-mode Y (no selection) signals the host
+    // to drop an @<path> into chat input. The path itself is
+    // resolved by the host because the engine doesn't know it.
+    let mut e = engine("hello");
+    let action = e.apply(ch('Y'));
+    assert!(
+        action.send_file_reference_to_chat,
+        "Y in Normal mode should raise send_file_reference_to_chat"
+    );
+    assert!(
+        action.send_to_chat.is_none(),
+        "Normal-mode Y must not ship buffer text — it's a file ref"
+    );
+    assert_eq!(e.mode(), Mode::Normal, "Y must not change mode");
+}
+
+#[test]
+fn visual_capital_y_still_ships_selection_not_file_reference() {
+    // Regression guard: Phase 10.17 added a Normal-mode `Y` arm
+    // but Visual-mode `Y` must keep shipping the selection.
+    let mut e = engine("abcdef");
+    e.apply(ch('v'));
+    e.apply(ch('l'));
+    e.apply(ch('l')); // selection covers "abc"
+    let action = e.apply(ch('Y'));
+    assert_eq!(action.send_to_chat.as_deref(), Some("abc"));
+    assert!(!action.send_file_reference_to_chat);
+}

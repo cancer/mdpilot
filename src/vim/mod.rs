@@ -65,6 +65,11 @@ pub struct Action {
     /// keeps yank in an internal register only, which is useless
     /// for the "copy text out of preview" workflow we want.
     pub copy_to_clipboard: Option<String>,
+    /// Phase 10.17: Normal-mode `Y` (no selection) asks the host to
+    /// drop an `@<current file>` reference into chat input. The
+    /// engine doesn't know the path, so it just raises this signal
+    /// and the host resolves the actual path from `PreviewState`.
+    pub send_file_reference_to_chat: bool,
 }
 
 impl Action {
@@ -296,6 +301,14 @@ impl VimEngine {
                     self.pending = Pending::Y;
                     Action::default()
                 }
+                // Phase 10.17: Normal-mode `Y` ships a file reference
+                // to chat. Mirrors Visual-mode `Y` (which ships the
+                // selection) — we reuse the key because in Normal
+                // mode there's no selection to ship anyway.
+                'Y' => Action {
+                    send_file_reference_to_chat: true,
+                    ..Default::default()
+                },
                 'p' => self.paste_after(),
                 'x' => self.delete_char(),
                 'u' => self.undo(),
