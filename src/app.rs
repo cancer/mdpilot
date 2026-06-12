@@ -163,7 +163,9 @@ enum ChatQuoteState {
 }
 
 /// Phase 10.3 (revised): the 2 or 3 panes the user can cycle focus
-/// through with Cmd+J / Cmd+K.
+/// through with Cmd+H / Cmd+L (Phase 10.20: pane navigation is
+/// horizontal, so h/l matches the vim mental model better than the
+/// previous Cmd+J / Cmd+K).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusedPane {
     Preview,
@@ -730,12 +732,14 @@ impl App {
         pressed
     }
 
-    /// Phase 10.3 (revised, direction swapped per user feedback):
-    /// `Cmd+J` cycles **backward** (Preview ← Chat ← Tree),
-    /// `Cmd+K` cycles **forward** (Preview → Chat → Tree).
-    /// Tree is only included when the sidebar is open.
+    /// Phase 10.20 (was 10.3): pane focus cycle.
+    /// `Cmd+H` cycles **backward** / leftward (Tree ← Preview ← Chat),
+    /// `Cmd+L` cycles **forward** / rightward  (Tree → Preview → Chat).
+    /// Tree is only included when the sidebar is open. h/l mirrors
+    /// vim's horizontal motion since the panes are arranged
+    /// horizontally on screen.
     fn consume_focus_preview_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::J);
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::H);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
             self.cycle_focus(ctx, false);
@@ -744,7 +748,7 @@ impl App {
     }
 
     fn consume_focus_chat_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::L);
         let pressed = ctx.input_mut(|i| i.consume_shortcut(&shortcut));
         if pressed {
             self.cycle_focus(ctx, true);
