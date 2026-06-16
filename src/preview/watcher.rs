@@ -265,7 +265,10 @@ pub const EXCLUDED_DIRS: &[&str] = &[
 
 /// Markdown extensions that count as "preview targets" for auto-follow.
 /// Case-insensitive (`README.MD`, `Notes.Markdown` should match).
-const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown"];
+/// Phase 10.27: `.mdx` も対象に追加。JSX 部分は egui_commonmark で
+/// そのまま素通りするが、本文の markdown 構造は読めるので一覧に
+/// 出すこと自体は有用。
+const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdx"];
 
 /// True when `name` is one of the dirs in [`EXCLUDED_DIRS`]. Pure,
 /// case-sensitive — the names are conventional and lowercasing would
@@ -686,7 +689,14 @@ mod tests {
 
     #[test]
     fn is_markdown_path_is_case_insensitive() {
-        for path in ["a.md", "A.MD", "guide.markdown", "Guide.Markdown"] {
+        for path in [
+            "a.md",
+            "A.MD",
+            "guide.markdown",
+            "Guide.Markdown",
+            "page.mdx",
+            "Page.MDX",
+        ] {
             assert!(
                 is_markdown_path(Path::new(path)),
                 "{path} should classify as markdown",
