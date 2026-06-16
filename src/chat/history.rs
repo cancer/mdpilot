@@ -25,6 +25,13 @@ pub struct ChatHistory {
     /// scrolled, so the message they just sent (and the incoming
     /// reply) is in view.
     pub scroll_to_bottom_pending: bool,
+    /// Phase 10.28: rolling buffer for `input_json_delta` fragments.
+    /// claude streams tool args as multiple JSON chunks; we
+    /// concatenate them here and re-parse on each delta — once the
+    /// buffer is a valid JSON value we write it back into the
+    /// matching `ToolBlock.input`. Reset whenever a new `ToolUse`
+    /// starts, so blocks don't bleed into each other.
+    pub current_tool_input_buffer: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +142,21 @@ impl ChatHistory {
         }
     }
 
+    /// Phase 10.28: replace the input of the most recent `ToolBlock`
+    /// across all assistant messages. Used by the
+    /// `input_json_delta` accumulator once the buffered fragments
+    /// form valid JSON.
+    pub fn set_last_tool_input(&mut self, input: Value) {
+        for message in self.messages.iter_mut().rev() {
+            if let ChatMessage::Assistant { tools, .. } = message {
+                if let Some(tool) = tools.last_mut() {
+                    tool.input = input;
+                    return;
+                }
+            }
+        }
+    }
+
     /// Populate `output` on the matching tool_use id, walking the most recent
     /// assistant message first.
     pub fn record_tool_result(&mut self, id: &str, output: String) {
@@ -171,6 +193,26 @@ impl ChatHistory {
                     input,
                     output: None,
                 });
+                // Phase 10.28: a new tool block starts a fresh
+                // input-json accumulator. Earlier blocks may have
+                // left partial state if their stream was
+                // truncated — reset unconditionally.
+                self.current_tool_input_buffer.clear();
+            }
+            ChatEvent::ToolInputDelta { partial_json } => {
+                self.current_tool_input_buffer.push_str(&partial_json);
+                // Try parsing on every delta: as soon as the
+                // accumulated fragments form valid JSON, swap it
+                // into the most recent tool block's input so the
+                // UI can render real args instead of `{}`.
+                if let Ok(value) =
+                    serde_json::from_str::<Value>(&self.current_tool_input_buffer)
+                {
+                    self.set_last_tool_input(value);
+                }
+            }
+            ChatEvent::ToolResult { id, content } => {
+                self.record_tool_result(&id, content);
             }
             ChatEvent::ApiRetry {
                 attempt,
@@ -401,6 +443,80 @@ mod tests {
             h.messages.last(),
             Some(ChatMessage::System(SystemMessage::ResultError { .. }))
         ));
+    }
+
+    #[test]
+    fn apply_tool_input_delta_fills_in_tool_args_when_buffer_parses() {
+        // Phase 10.28: claude streams tool args in fragments via
+        // `input_json_delta`. The history should accumulate them
+        // and, once the buffer is valid JSON, write it into the
+        // last tool block's `input` so the UI stops showing `{}`.
+        let mut h = ChatHistory::default();
+        h.start_assistant(Some("msg_1".into()));
+        h.apply(ChatEvent::ToolUse {
+            id: "tu_1".into(),
+            name: "Bash".into(),
+            input: Value::Object(Default::default()),
+        });
+        for fragment in [r#"{"command":"#, r#" "ls -la""#, r#"}"#] {
+            h.apply(ChatEvent::ToolInputDelta {
+                partial_json: fragment.into(),
+            });
+        }
+        // Walk to the last tool block in the latest assistant.
+        let Some(ChatMessage::Assistant { tools, .. }) = h.messages.last() else {
+            panic!("expected an assistant message at the tail");
+        };
+        let tool = tools.last().expect("at least one tool block");
+        assert_eq!(tool.input["command"], "ls -la");
+    }
+
+    #[test]
+    fn apply_tool_input_delta_buffer_resets_per_tool_use() {
+        // Two tools in a row — second tool's accumulator must not
+        // include leftover fragments from the first.
+        let mut h = ChatHistory::default();
+        h.start_assistant(Some("msg_1".into()));
+        h.apply(ChatEvent::ToolUse {
+            id: "tu_1".into(),
+            name: "Bash".into(),
+            input: Value::Object(Default::default()),
+        });
+        h.apply(ChatEvent::ToolInputDelta {
+            partial_json: r#"{"command": "ls"}"#.into(),
+        });
+        h.apply(ChatEvent::ToolUse {
+            id: "tu_2".into(),
+            name: "Read".into(),
+            input: Value::Object(Default::default()),
+        });
+        h.apply(ChatEvent::ToolInputDelta {
+            partial_json: r#"{"file_path": "/a"}"#.into(),
+        });
+        let Some(ChatMessage::Assistant { tools, .. }) = h.messages.last() else {
+            panic!();
+        };
+        assert_eq!(tools[0].input["command"], "ls");
+        assert_eq!(tools[1].input["file_path"], "/a");
+    }
+
+    #[test]
+    fn apply_tool_result_records_output_on_matching_tool() {
+        let mut h = ChatHistory::default();
+        h.start_assistant(None);
+        h.apply(ChatEvent::ToolUse {
+            id: "tu_x".into(),
+            name: "Bash".into(),
+            input: Value::Null,
+        });
+        h.apply(ChatEvent::ToolResult {
+            id: "tu_x".into(),
+            content: "ok".into(),
+        });
+        let Some(ChatMessage::Assistant { tools, .. }) = h.messages.last() else {
+            panic!();
+        };
+        assert_eq!(tools[0].output.as_deref(), Some("ok"));
     }
 
     #[test]

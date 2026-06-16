@@ -58,25 +58,116 @@ pub enum ChatEvent {
     Stderr {
         line: String,
     },
+    /// Phase 10.28: streaming tool argument fragment.
+    /// `stream_event/content_block_delta/input_json_delta` carries
+    /// pieces of the tool's input JSON; the concatenation across
+    /// successive deltas forms a valid JSON object.
+    ToolInputDelta {
+        partial_json: String,
+    },
+    /// Phase 10.28: a `tool_result` block from a `"user"` event.
+    /// claude CLI emits these once it finishes executing a tool;
+    /// matched against the corresponding `ToolUse` by `id`.
+    ToolResult {
+        id: String,
+        content: String,
+    },
 }
 
 /// Translate a single decoded JSON value into a `ChatEvent`. Returns
 /// `ChatEvent::Unknown` for any event the parser does not yet handle so the
 /// caller has a single, total mapping.
+///
+/// For multi-event payloads (a `"user"` event containing several
+/// `tool_result` blocks) this returns only the first; use
+/// [`parse_events`] to get the full list.
 pub fn parse_event(value: &Value) -> ChatEvent {
+    parse_events(value)
+        .into_iter()
+        .next()
+        .unwrap_or(ChatEvent::Unknown {
+            event_type: "<empty>".into(),
+        })
+}
+
+/// Phase 10.28: a `"user"` event can carry multiple `tool_result`
+/// blocks (claude ran several tools in parallel), so the parser
+/// needs to be able to emit more than one event per JSON line.
+/// Most event types still produce a single-element vec.
+pub fn parse_events(value: &Value) -> Vec<ChatEvent> {
     let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
     match event_type {
-        "system" => parse_system(value),
-        "assistant" => parse_assistant(value),
-        "stream_event" => parse_stream_event(value),
-        "result" => ChatEvent::Result {
+        "system" => vec![parse_system(value)],
+        "assistant" => vec![parse_assistant(value)],
+        "stream_event" => vec![parse_stream_event(value)],
+        "user" => parse_user_events(value),
+        "result" => vec![ChatEvent::Result {
             subtype: string_field(value, "subtype"),
             total_cost_usd: value.get("total_cost_usd").and_then(Value::as_f64),
             terminal_reason: optional_string_field(value, "terminal_reason"),
-        },
-        other => ChatEvent::Unknown {
+        }],
+        other => vec![ChatEvent::Unknown {
             event_type: other.to_string(),
-        },
+        }],
+    }
+}
+
+/// Walk the `message.content` array of a `"user"` event and emit
+/// one `ToolResult` per `tool_result` block. Any non-tool_result
+/// content (rare on the user side) is collapsed into a single
+/// `Unknown` so the parser doesn't go silent on schema drift.
+fn parse_user_events(value: &Value) -> Vec<ChatEvent> {
+    let content = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array);
+    let Some(blocks) = content else {
+        return vec![ChatEvent::Unknown {
+            event_type: "user/no-content".into(),
+        }];
+    };
+    let mut events = Vec::new();
+    for block in blocks {
+        let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind == "tool_result" {
+            let id = block
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let content = extract_tool_result_content(block.get("content"));
+            events.push(ChatEvent::ToolResult { id, content });
+        }
+    }
+    if events.is_empty() {
+        events.push(ChatEvent::Unknown {
+            event_type: "user/no-tool-result".into(),
+        });
+    }
+    events
+}
+
+/// `tool_result.content` is either a plain string (Bash, Read, etc.)
+/// or an array of content blocks (text / image). Flatten the array
+/// case to a newline-joined string of just the text blocks; image
+/// blocks are ignored for now (the chat pane has no inline-image
+/// rendering yet).
+fn extract_tool_result_content(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|b| {
+                let kind = b.get("type").and_then(Value::as_str).unwrap_or("");
+                if kind == "text" {
+                    b.get("text").and_then(Value::as_str).map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -136,18 +227,27 @@ fn parse_stream_event(value: &Value) -> ChatEvent {
                 .and_then(|d| d.get("type"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if delta_type == "text_delta" {
-                let text = delta
-                    .and_then(|d| d.get("text"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let uuid = value.get("uuid").and_then(Value::as_str).map(String::from);
-                ChatEvent::TextDelta { uuid, text }
-            } else {
-                ChatEvent::Unknown {
-                    event_type: format!("stream_event/content_block_delta/{delta_type}"),
+            match delta_type {
+                "text_delta" => {
+                    let text = delta
+                        .and_then(|d| d.get("text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let uuid = value.get("uuid").and_then(Value::as_str).map(String::from);
+                    ChatEvent::TextDelta { uuid, text }
                 }
+                "input_json_delta" => {
+                    let partial_json = delta
+                        .and_then(|d| d.get("partial_json"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    ChatEvent::ToolInputDelta { partial_json }
+                }
+                _ => ChatEvent::Unknown {
+                    event_type: format!("stream_event/content_block_delta/{delta_type}"),
+                },
             }
         }
         "content_block_start" => {
@@ -210,14 +310,19 @@ pub fn pipe_stdout_to_channel<R: BufRead, F: Fn()>(reader: R, sender: Sender<Cha
             Ok(line) if line.is_empty() => continue,
             Ok(line) => match serde_json::from_str::<Value>(&line) {
                 Ok(value) => {
-                    let event = parse_event(&value);
-                    if let ChatEvent::Unknown { event_type } = &event {
-                        tracing::warn!(target: "claude::stdout", "unknown event: {event_type}");
+                    // Phase 10.28: a single JSON line may expand to
+                    // multiple events (e.g., `"user"` carrying N
+                    // tool_results), so parse via parse_events and
+                    // ship each one separately.
+                    for event in parse_events(&value) {
+                        if let ChatEvent::Unknown { event_type } = &event {
+                            tracing::warn!(target: "claude::stdout", "unknown event: {event_type}");
+                        }
+                        if sender.send(event).is_err() {
+                            return;
+                        }
+                        wake();
                     }
-                    if sender.send(event).is_err() {
-                        break;
-                    }
-                    wake();
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -490,5 +595,104 @@ mod tests {
         assert!(!looks_like_error("starting up..."));
         assert!(!looks_like_error("[info] using model claude-opus"));
         assert!(!looks_like_error("checking auth"));
+    }
+
+    #[test]
+    fn parses_input_json_delta_as_tool_input_delta() {
+        let value = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": "{\"command\":"
+                }
+            }
+        });
+        assert_eq!(
+            parse_event(&value),
+            ChatEvent::ToolInputDelta {
+                partial_json: "{\"command\":".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_user_tool_result_string_content() {
+        let value = json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_01abc",
+                        "content": "files: a.md b.md\n",
+                    }
+                ]
+            }
+        });
+        let events = parse_events(&value);
+        assert_eq!(
+            events,
+            vec![ChatEvent::ToolResult {
+                id: "tu_01abc".into(),
+                content: "files: a.md b.md\n".into(),
+            }],
+        );
+    }
+
+    #[test]
+    fn parses_user_tool_result_array_content_joins_text_blocks() {
+        let value = json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_2",
+                        "content": [
+                            {"type": "text", "text": "line 1"},
+                            {"type": "image", "source": {}},
+                            {"type": "text", "text": "line 2"}
+                        ]
+                    }
+                ]
+            }
+        });
+        let events = parse_events(&value);
+        assert_eq!(
+            events,
+            vec![ChatEvent::ToolResult {
+                id: "tu_2".into(),
+                content: "line 1\nline 2".into(),
+            }],
+        );
+    }
+
+    #[test]
+    fn parses_multiple_tool_results_from_one_user_event() {
+        let value = json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tu_a", "content": "A"},
+                    {"type": "tool_result", "tool_use_id": "tu_b", "content": "B"}
+                ]
+            }
+        });
+        let events = parse_events(&value);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            ChatEvent::ToolResult { id, content } if id == "tu_a" && content == "A"
+        ));
+        assert!(matches!(
+            &events[1],
+            ChatEvent::ToolResult { id, content } if id == "tu_b" && content == "B"
+        ));
     }
 }
