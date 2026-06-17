@@ -37,6 +37,13 @@ pub struct EditorState {
     /// preview's `ScrollArea` never follows j/k off-screen or
     /// trailing newlines past the bottom edge.
     pub scroll_to_cursor: bool,
+    /// Phase 10.29: per-line body-Galley cache keyed by
+    /// (line text, theme, dark, search-match ranges, wrap width).
+    /// Without it, syntect + font shaping ran for all 2500 rows
+    /// every frame on a large file and per-keystroke latency
+    /// became visible. Entries are rotated each frame so memory
+    /// stays bounded by `unique lines currently in buffer`.
+    pub body_galley_cache: LineGalleyCache,
 }
 
 impl EditorState {
@@ -44,12 +51,21 @@ impl EditorState {
         Self {
             vim: VimEngine::new(doc.text.clone()),
             scroll_to_cursor: true,
+            body_galley_cache: LineGalleyCache::default(),
         }
     }
 
     pub fn mode(&self) -> VimMode {
         self.vim.mode()
     }
+}
+
+/// Phase 10.29: cache the laid-out body Galley per source line so
+/// the syntect highlighter and egui font shaper don't re-run on
+/// 2500 unchanged lines every frame.
+#[derive(Default, Debug)]
+pub struct LineGalleyCache {
+    entries: std::collections::HashMap<u64, std::sync::Arc<egui::Galley>>,
 }
 
 /// Theme name used in dark mode. Bundled by `default-themes`.
@@ -175,14 +191,27 @@ pub fn show(ui: &mut egui::Ui, state: &mut PreviewState) {
             // "originally loaded from disk" reference; keystroke save
             // (Phase 10.4) will sync them.
             let scroll_request = std::mem::take(&mut editor.scroll_to_cursor);
+            // Phase 10.29: split-borrow editor into the immutable
+            // vim engine (for buffer + cursor + search state) and
+            // the mutable Galley cache. Rust's field-level borrow
+            // checker lets us hold both at once because they are
+            // disjoint fields.
+            let EditorState {
+                vim,
+                body_galley_cache,
+                ..
+            } = &mut **editor;
+            let vim_ro: &VimEngine = vim;
+            let buffer = vim_ro.buffer();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     show_source_grid(
                         ui,
-                        editor.vim.buffer(),
+                        buffer,
                         theme_name,
-                        Some(editor),
+                        Some(vim_ro),
+                        Some(body_galley_cache),
                         scroll_request,
                     );
                 });
@@ -319,13 +348,27 @@ fn show_source_grid(
     ui: &mut egui::Ui,
     source: &str,
     theme_name: &str,
-    editor: Option<&EditorState>,
+    vim: Option<&VimEngine>,
+    body_cache: Option<&mut LineGalleyCache>,
     scroll_to_cursor: bool,
 ) {
     let syntax = markdown_syntax();
     let theme = theme_for(theme_name);
     let mut highlighter = HighlightLines::new(syntax, theme);
     let set = syntax_set();
+    let dark = theme_name == SYNTAX_THEME_DARK;
+    // Phase 10.29: rotate the body Galley cache. We move the old
+    // entries out of `body_cache` for read-only lookup, build a
+    // fresh map of "what we used this frame", and write it back
+    // at the end. Lines no longer in the buffer drop out
+    // automatically so memory stays bounded by current line count.
+    let mut body_cache = body_cache;
+    let old_entries: std::collections::HashMap<u64, std::sync::Arc<egui::Galley>> = body_cache
+        .as_mut()
+        .map(|c| std::mem::take(&mut c.entries))
+        .unwrap_or_default();
+    let mut new_entries: std::collections::HashMap<u64, std::sync::Arc<egui::Galley>> =
+        std::collections::HashMap::with_capacity(old_entries.len().max(64));
 
     let total_lines = source.lines().count().max(1);
     let gutter_width = total_lines.to_string().len();
@@ -345,11 +388,11 @@ fn show_source_grid(
     // Pre-compute the source line that holds the cursor (and where
     // within that line, byte-wise) so we can paint a cursor marker
     // on the matching row below.
-    let cursor_pos = editor.map(|ed| ed.vim.cursor());
+    let cursor_pos = vim.map(|v| v.cursor());
     let cursor_line = cursor_pos.map(|p| line_index_of(source, p));
     // Phase 10.6 / Visual mode: byte range of the current visual
     // selection (inclusive end already baked in by the engine).
-    let visual_range = editor.and_then(|ed| ed.vim.visual_range());
+    let visual_range = vim.and_then(|v| v.visual_range());
     let visual_bg = egui::Color32::from_rgba_unmultiplied(220, 180, 70, 90);
     // Phase 10.6 (cursor): char-precise cursor. monospace font means
     // glyph width is uniform — multiply by the line-local column to
@@ -362,8 +405,8 @@ fn show_source_grid(
     let match_bg = egui::Color32::from_rgba_unmultiplied(220, 180, 70, 90);
     let active_match_bg = egui::Color32::from_rgba_unmultiplied(255, 140, 60, 140);
     let empty_matches: &[std::ops::Range<usize>] = &[];
-    let (matches, active_match_idx) = editor
-        .map(|ed| (ed.vim.search_matches(), ed.vim.current_match()))
+    let (matches, active_match_idx) = vim
+        .map(|v| (v.search_matches(), v.current_match()))
         .unwrap_or((empty_matches, None));
 
     egui::Grid::new("preview_source_grid")
@@ -432,52 +475,67 @@ fn show_source_grid(
                     })
                     .collect();
 
-                let mut body_job = egui::text::LayoutJob::default();
-                match highlighter.highlight_line(raw_line, set) {
-                    Ok(ranges) => {
-                        let mut piece_start = 0usize;
-                        for (style, piece) in ranges {
-                            let trimmed = piece.strip_suffix('\n').unwrap_or(piece);
-                            if !trimmed.is_empty() {
-                                let color = syntect_to_egui(style.foreground);
-                                append_with_matches(
-                                    &mut body_job,
-                                    trimmed,
-                                    piece_start,
-                                    color,
-                                    style.font_style,
-                                    &line_match_ranges,
-                                    match_bg,
-                                    active_match_bg,
-                                );
+                // Phase 10.29: keep syntect's per-line state in
+                // sync (fenced code blocks etc. depend on the
+                // running parse state) by always calling
+                // `highlight_line`. The cache key + the Galley
+                // cache itself skip the heavier LayoutJob build
+                // and `layout_job` shape/hash on hit — that's the
+                // ~100ms/frame we were burning on a 2500-line file.
+                let highlight_result = highlighter.highlight_line(raw_line, set);
+                let wrap_width = ui.available_width();
+                let cache_key = line_galley_cache_key(
+                    raw_line,
+                    theme_name,
+                    dark,
+                    &line_match_ranges,
+                    wrap_width,
+                );
+                let galley = if let Some(cached) = old_entries.get(&cache_key) {
+                    cached.clone()
+                } else {
+                    let mut body_job = egui::text::LayoutJob::default();
+                    match highlight_result {
+                        Ok(ranges) => {
+                            let mut piece_start = 0usize;
+                            for (style, piece) in ranges {
+                                let trimmed = piece.strip_suffix('\n').unwrap_or(piece);
+                                if !trimmed.is_empty() {
+                                    let color = syntect_to_egui(style.foreground);
+                                    append_with_matches(
+                                        &mut body_job,
+                                        trimmed,
+                                        piece_start,
+                                        color,
+                                        style.font_style,
+                                        &line_match_ranges,
+                                        match_bg,
+                                        active_match_bg,
+                                    );
+                                }
+                                piece_start += piece.len();
                             }
-                            piece_start += piece.len();
+                        }
+                        Err(_) => {
+                            append_with_matches(
+                                &mut body_job,
+                                line,
+                                0,
+                                fallback_body_color,
+                                FontStyle::empty(),
+                                &line_match_ranges,
+                                match_bg,
+                                active_match_bg,
+                            );
                         }
                     }
-                    Err(_) => {
-                        append_with_matches(
-                            &mut body_job,
-                            line,
-                            0,
-                            fallback_body_color,
-                            FontStyle::empty(),
-                            &line_match_ranges,
-                            match_bg,
-                            active_match_bg,
-                        );
+                    if body_job.sections.is_empty() {
+                        append(&mut body_job, " ", fallback_body_color, FontStyle::empty());
                     }
-                }
-                if body_job.sections.is_empty() {
-                    append(&mut body_job, " ", fallback_body_color, FontStyle::empty());
-                }
-                // Lay out the body ourselves so we can read back the
-                // wrapped row positions for char-precise cursor
-                // placement. `label_text_selection` (egui's plugin
-                // API) paints the galley and handles selection,
-                // matching what `egui::Label::selectable(true)`
-                // would have done internally.
-                body_job.wrap.max_width = ui.available_width();
-                let galley = ui.ctx().fonts_mut(|f| f.layout_job(body_job));
+                    body_job.wrap.max_width = wrap_width;
+                    ui.ctx().fonts_mut(|f| f.layout_job(body_job))
+                };
+                new_entries.insert(cache_key, galley.clone());
                 let (body_rect, body_resp) =
                     ui.allocate_exact_size(galley.size(), egui::Sense::click_and_drag());
 
@@ -524,8 +582,8 @@ fn show_source_grid(
                 // text was actually drawn — even mid-wrap and with
                 // CJK characters.
                 if Some(idx) == cursor_line {
-                    if let Some(ed) = editor {
-                        let cursor_color = match ed.mode() {
+                    if let Some(v) = vim {
+                        let cursor_color = match v.mode() {
                             VimMode::Normal => egui::Color32::from_rgb(80, 160, 220),
                             VimMode::Insert => egui::Color32::from_rgb(80, 200, 100),
                             VimMode::Visual | VimMode::VisualLine => {
@@ -573,6 +631,43 @@ fn show_source_grid(
                 line_start_in_buffer += line_len;
             }
         });
+    // Phase 10.29: write the just-used cache entries back. Lines
+    // that no longer exist in `source` (because the user edited
+    // them away) drop out automatically; cache size stays bounded
+    // by the buffer's current line count.
+    if let Some(c) = body_cache.as_mut() {
+        c.entries = new_entries;
+    }
+    // `old_entries` is dropped here — entries we didn't touch this
+    // frame go away.
+    drop(old_entries);
+}
+
+/// Phase 10.29: stable hash key for the per-line body Galley cache.
+/// Two lines that produce the same Galley share a key (and thus a
+/// cached Arc); any change to text, theme, search-match overlap, or
+/// wrap width forces a miss and a fresh layout.
+fn line_galley_cache_key(
+    raw_line: &str,
+    theme_name: &str,
+    dark: bool,
+    line_match_ranges: &[(std::ops::Range<usize>, bool)],
+    wrap_width: f32,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    raw_line.hash(&mut hasher);
+    theme_name.hash(&mut hasher);
+    dark.hash(&mut hasher);
+    for (range, active) in line_match_ranges {
+        range.start.hash(&mut hasher);
+        range.end.hash(&mut hasher);
+        active.hash(&mut hasher);
+    }
+    // Quantize wrap width to whole pixels — sub-pixel jitter (e.g.,
+    // from DPI scaling) would otherwise invalidate every entry.
+    (wrap_width.round() as i32).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Phase 10.6 (vis): append `text` to `job` while splitting it into
@@ -797,7 +892,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                show_source_grid(ui, "# Title\n\nbody\n", SYNTAX_THEME_DARK, None, false);
+                show_source_grid(ui, "# Title\n\nbody\n", SYNTAX_THEME_DARK, None, None, false);
             });
         });
     }
@@ -807,7 +902,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                show_source_grid(ui, "", SYNTAX_THEME_DARK, None, false);
+                show_source_grid(ui, "", SYNTAX_THEME_DARK, None, None, false);
             });
         });
     }
@@ -817,7 +912,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                show_source_grid(ui, "hello\n", SYNTAX_THEME_LIGHT, None, false);
+                show_source_grid(ui, "hello\n", SYNTAX_THEME_LIGHT, None, None, false);
             });
         });
     }
